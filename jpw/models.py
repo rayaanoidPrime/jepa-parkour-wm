@@ -32,28 +32,82 @@ class MLP(nn.Module):
         return x
 
 
+class HeightmapCNN(nn.Module):
+    """[..., H, W] heightmap / depth image -> [..., out] features (any number of leading dims)."""
+
+    channels: int
+    out: int
+
+    @nn.compact
+    def __call__(self, h):
+        lead = h.shape[:-2]
+        x = h.reshape((-1,) + h.shape[-2:] + (1,)).astype(jnp.float32)
+        x = nn.silu(nn.Conv(self.channels, (3, 3), strides=(2, 2), padding="SAME")(x))
+        x = nn.silu(nn.Conv(2 * self.channels, (3, 3), strides=(2, 2), padding="SAME")(x))
+        x = x.reshape(x.shape[0], -1)
+        x = nn.LayerNorm()(nn.Dense(self.out)(x))
+        return x.reshape(lead + (self.out,))
+
+
+class ObsEncoder(nn.Module):
+    """Vector observation (+ optional heightmap) -> layer-normed latent."""
+
+    hidden: int
+    depth: int
+    latent_dim: int
+    use_hmap: bool = False
+    cnn_channels: int = 32
+
+    @nn.compact
+    def __call__(self, vec, hmap=None):
+        x = vec
+        if self.use_hmap:
+            f = HeightmapCNN(self.cnn_channels, self.hidden)(hmap)
+            x = jnp.concatenate([vec, f], axis=-1)
+        return MLP(self.hidden, self.depth, self.latent_dim, ln_out=True)(x)
+
+
 class WorldModel(nn.Module):
     """Decoder-free JEPA world model.
 
-    encode:   o_t -> z_t                      (trained against an EMA target encoder)
+    encode:   (o_t, h_t) -> z_t               (trained against an EMA target encoder)
     step:     (z_t, a_t) -> z_{t+1}           (residual, layer-normed latent dynamics)
     reward:   (z_t, a_t) -> r_t               (predicted in symlog space)
     cont:     (z_t, a_t) -> P(episode continues after this step)
+    contact:  (z_t, a_t) -> P(each contact flag is set after this step)
+    student:  (proprio_t, h_t) -> z_t         (deployable encoder; only if `asymmetric`)
+
+    o_t is the full world-model input (proprio, plus privileged state if enabled); h_t is the
+    optional heightmap. The student sees proprio = o_t[..., :prop_dim] and h_t only.
     """
 
     latent_dim: int
     hidden: int
     depth: int
+    obs_dim: int = 1
+    prop_dim: int = 1
+    use_hmap: bool = False
+    cnn_channels: int = 32
+    contact_dim: int = 0
+    asymmetric: bool = False
 
     def setup(self):
-        self.encoder = MLP(self.hidden, self.depth, self.latent_dim, ln_out=True)
+        self.encoder = ObsEncoder(self.hidden, self.depth, self.latent_dim, self.use_hmap, self.cnn_channels)
+        if self.asymmetric:
+            self.student_enc = ObsEncoder(self.hidden, self.depth, self.latent_dim, self.use_hmap,
+                                          self.cnn_channels)
         self.dynamics = MLP(self.hidden, self.depth, self.latent_dim)
         self.dyn_norm = nn.LayerNorm()
         self.reward_head = MLP(self.hidden, 2, 1)
         self.cont_head = MLP(self.hidden, 2, 1)
+        if self.contact_dim:
+            self.contact_head = MLP(self.hidden, 2, self.contact_dim)
 
-    def encode(self, obs):
-        return self.encoder(obs)
+    def encode(self, obs, hmap=None):
+        return self.encoder(obs, hmap)
+
+    def student(self, obs, hmap=None):
+        return self.student_enc(obs[..., : self.prop_dim], hmap)
 
     def step(self, z, a):
         return self.dyn_norm(z + self.dynamics(jnp.concatenate([z, a], -1)))
@@ -67,8 +121,15 @@ class WorldModel(nn.Module):
     def cont_logit(self, z, a):
         return self.cont_head(jnp.concatenate([z, a], -1))[..., 0]
 
-    def __call__(self, obs, a):  # only used to initialise every submodule
-        z = self.encode(obs)
+    def contact_logit(self, z, a):
+        return self.contact_head(jnp.concatenate([z, a], -1))
+
+    def __call__(self, obs, a, hmap=None):  # only used to initialise every submodule
+        z = self.encode(obs, hmap)
+        if self.asymmetric:
+            self.student(obs, hmap)
+        if self.contact_dim:
+            self.contact_logit(z, a)
         return self.step(z, a), self.reward_symlog(z, a), self.cont_logit(z, a)
 
 

@@ -7,50 +7,31 @@ Each iteration:
 
 Usage:
   python -m jpw.train --preset dummy                      # CPU sanity check, no MuJoCo
+  python -m jpw.train --preset dummy_full                 # + heightmap, contact head, student actor
   python -m jpw.train --preset smoke                      # small MJX run
   python -m jpw.train --set env.num_envs=4096 ac.horizon=32
+  python -m jpw.train --set train.resume=runs/x/ckpt_0001000.pkl        # continue a run
+  python -m jpw.train --set train.init_data=data/go1 train.pretrain_updates=500   # offline stage 1
 """
 from __future__ import annotations
 
 import argparse
 import os
-import pickle
 import time
 
 import jax
 import jax.numpy as jnp
 
-from jpw import replay
+from jpw import checkpoint, replay
 from jpw.agent import Agent
+from jpw.collect import make_collect
 from jpw.config import build_config
-from jpw.envs import get_obs, make_env
-from jpw.models import sample_tanh
-from jpw.tracking import Tracker
+from jpw.envs import get_spec, make_env
 
 
-def make_collect(env, agent: Agent, n_steps: int, use_priv: bool):
-    def collect(ts, env_state, key, ep_ret):
-        def body(carry, _):
-            es, key, ep_ret = carry
-            key, k = jax.random.split(key)
-            obs = get_obs(es.obs, use_priv)
-            z = agent.encode(ts.wm, obs)
-            mean, std = agent.actor.apply(ts.actor, z)
-            a, _ = sample_tanh(mean, std, k)
-            nxt = env.step(es, a)
-            done = nxt.done.astype(jnp.float32)
-            trunc = nxt.info["truncation"].astype(jnp.float32)
-            reward = nxt.reward.astype(jnp.float32)
-            ep_ret = ep_ret + reward
-            fin_sum = jnp.sum(jnp.where(done > 0, ep_ret, 0.0))
-            fin_cnt = jnp.sum(done)
-            ep_ret = jnp.where(done > 0, 0.0, ep_ret)
-            return (nxt, key, ep_ret), (obs, a, reward, done, trunc, fin_sum, fin_cnt)
-
-        (es, key, ep_ret), out = jax.lax.scan(body, (env_state, key, ep_ret), None, length=n_steps)
-        return es, key, ep_ret, out
-
-    return jax.jit(collect)
+def _check_spec(what: str, got, want) -> None:
+    if got != want:
+        raise ValueError(f"{what} was made for {got}, but this env produces {want}")
 
 
 def main(argv=None):
@@ -59,6 +40,8 @@ def main(argv=None):
     p.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE")
     p.add_argument("--run-name", default=None)
     args = p.parse_args(argv)
+
+    from jpw.tracking import Tracker  # after arg parsing so --help doesn't need wandb
 
     cfg = build_config(args.preset, args.set)
     t = cfg.train
@@ -75,29 +58,62 @@ def main(argv=None):
     key = jax.random.PRNGKey(t.seed)
     key, k_env, k_agent = jax.random.split(key, 3)
     env_state = jax.jit(env.reset)(jax.random.split(k_env, n))
-    obs_dim = get_obs(env_state.obs, cfg.env.use_privileged).shape[-1]
-    act_dim = env.action_size
-    print(f"env={cfg.env.name} num_envs={n} obs_dim={obs_dim} act_dim={act_dim}", flush=True)
+    spec = get_spec(env_state, cfg.env, env.action_size)
+    print(f"env={cfg.env.name} num_envs={n} spec={spec}", flush=True)
 
-    agent = Agent(cfg, obs_dim, act_dim)
+    agent = Agent(cfg, spec)
     ts = agent.init(k_agent)
-    rb = replay.init(t.replay_capacity, n, obs_dim, act_dim)
-
-    collect = make_collect(env, agent, t.collect_steps, cfg.env.use_privileged)
-    add = jax.jit(replay.add, donate_argnums=(0,))
-    update = jax.jit(agent.update, donate_argnums=(0,))
+    start_it, env_steps = 0, 0
+    if t.resume:
+        _, ck_spec, _, ts, meta = checkpoint.load(t.resume)
+        _check_spec(f"checkpoint {t.resume}", ck_spec, spec)
+        start_it, env_steps = meta["it"] + 1, meta["env_steps"]
+        print(f"resumed from {t.resume} (it={meta['it']}, env_steps={env_steps})", flush=True)
 
     seq_len = cfg.wm.pred_horizon + 1
-    filled = 0
+    if t.init_data:
+        from jpw.export import load_rollouts
+
+        arrays, data_spec = load_rollouts(t.init_data)
+        _check_spec(f"data {t.init_data}", data_spec, spec)
+        if arrays["obs"].shape[1] != n:
+            raise ValueError(f"data has {arrays['obs'].shape[1]} envs but env.num_envs={n}; "
+                             "export with the same num_envs")
+        rb = replay.from_arrays(arrays, t.replay_capacity, spec)
+        filled = int(rb.size)
+        print(f"preloaded {filled} replay rows from {t.init_data}", flush=True)
+        if t.pretrain_updates:
+            pretrain = jax.jit(agent.pretrain, donate_argnums=(0,))
+            for i in range(t.pretrain_updates):
+                key, k = jax.random.split(key)
+                ts, pm = pretrain(ts, rb, k)
+                if i % max(t.log_every, 1) == 0 or i == t.pretrain_updates - 1:
+                    pm = jax.device_get(pm)
+                    print(f"[pretrain {i}] jepa={pm['wm/jepa']:.4g} latent_std={pm['wm/latent_std']:.4g} "
+                          f"reward={pm['wm/reward']:.4g}", flush=True)
+    else:
+        rb = replay.init(t.replay_capacity, n, spec)
+        filled = 0
+
+    collect = make_collect(env, agent, t.collect_steps, cfg.env.use_privileged, cfg.env.use_heightmap)
+    add = jax.jit(replay.add_chunk, donate_argnums=(0,))
+    update = jax.jit(agent.update, donate_argnums=(0,))
+
     ep_ret = jnp.zeros((n,), jnp.float32)
-    ep_sum, ep_cnt, env_steps = 0.0, 0.0, 0
+    ep_sum, ep_cnt = 0.0, 0.0
     window_steps, window_t0 = 0, time.time()
     last_m: dict = {}
 
-    for it in range(t.iters):
+    def save_ckpt(it: int, tag: str) -> None:
+        path = os.path.join(run_dir, f"ckpt_{tag}.pkl")
+        checkpoint.save(path, cfg, spec, ts, it, env_steps)
+        print(f"saved {path}", flush=True)
+
+    last_it = start_it - 1
+    for it in range(start_it, t.iters):
+        last_it = it
         env_state, key, ep_ret, out = collect(ts, env_state, key, ep_ret)
-        obs_c, a_c, r_c, d_c, tr_c, fin_sum, fin_cnt = out
-        rb = add(rb, obs_c, a_c, r_c, d_c, tr_c)
+        rb = add(rb, {k: v for k, v in out.items() if k in replay.FIELDS})
         filled = min(filled + t.collect_steps, t.replay_capacity)
         env_steps += t.collect_steps * n
         window_steps += t.collect_steps * n
@@ -106,16 +122,16 @@ def main(argv=None):
             key, k = jax.random.split(key)
             ts, last_m = update(ts, rb, k)
 
-        ep_sum += float(jnp.sum(fin_sum))
-        ep_cnt += float(jnp.sum(fin_cnt))
+        ep_sum += float(jnp.sum(out["fin_sum"]))
+        ep_cnt += float(jnp.sum(out["fin_cnt"]))
 
         if it % t.log_every == 0 or it == t.iters - 1:
             jax.block_until_ready(ts.wm)
             dt = time.time() - window_t0
             m = {k: v for k, v in jax.device_get(last_m).items()}
             m.update({
-                "env/reward_per_step": float(jnp.mean(r_c)),
-                "env/done_rate": float(jnp.mean(d_c)),
+                "env/reward_per_step": float(jnp.mean(out["rew"])),
+                "env/done_rate": float(jnp.mean(out["done"])),
                 "env/episodes": ep_cnt,
                 "perf/env_sps": window_steps / max(dt, 1e-6),
                 "perf/iter": it,
@@ -126,12 +142,10 @@ def main(argv=None):
             ep_sum, ep_cnt, window_steps, window_t0 = 0.0, 0.0, 0, time.time()
 
         if t.ckpt_every and it > 0 and it % t.ckpt_every == 0:
-            path = os.path.join(run_dir, f"ckpt_{it:07d}.pkl")
-            with open(path, "wb") as f:
-                pickle.dump({"cfg": cfg.to_dict(), "it": it, "env_steps": env_steps,
-                             "params": jax.device_get({"wm": ts.wm, "actor": ts.actor, "critic": ts.critic})}, f)
-            print(f"saved {path}", flush=True)
+            save_ckpt(it, f"{it:07d}")
 
+    if t.ckpt_every and last_it >= start_it:
+        save_ckpt(last_it, "final")
     tracker.finish()
 
 

@@ -4,6 +4,10 @@ Every env here follows the Brax/Playground convention used by the rest of the co
 `reset(keys[N, 2]) -> state`, `step(state, actions[N, A]) -> state`, with `state.obs`,
 `state.reward[N]`, `state.done[N]` and `state.info["truncation"][N]`, and auto-reset on done
 (the returned obs after a done step is the first obs of the next episode).
+
+Optional extras the models can use:
+  obs["heightmap"]        [N, H, W]  heightmap / depth image (EnvCfg.use_heightmap)
+  state.info["contact"]   [N, C]     contact flags *after* the step, e.g. one per foot
 """
 from __future__ import annotations
 
@@ -14,6 +18,7 @@ import jax.numpy as jnp
 from flax import struct
 
 from jpw.config import EnvCfg
+from jpw.spec import Spec
 
 
 def get_obs(obs, use_privileged: bool) -> jax.Array:
@@ -26,9 +31,37 @@ def get_obs(obs, use_privileged: bool) -> jax.Array:
     return obs
 
 
+def get_hmap(obs, use_heightmap: bool):
+    """Heightmap / depth image [N, H, W] from a dict observation, or None."""
+    if use_heightmap and isinstance(obs, Mapping) and "heightmap" in obs:
+        return obs["heightmap"]
+    return None
+
+
+def get_contact(state):
+    """Contact flags [N, C] (float32) from state.info, or None if the env doesn't report them."""
+    c = state.info.get("contact") if hasattr(state, "info") else None
+    return None if c is None else c.astype(jnp.float32)
+
+
+def get_spec(state, cfg: EnvCfg, act_dim: int) -> Spec:
+    """Describe what an env produces, from one reset state."""
+    prop = state.obs["state"].shape[-1] if isinstance(state.obs, Mapping) else None
+    obs_dim = get_obs(state.obs, cfg.use_privileged).shape[-1]
+    h = get_hmap(state.obs, cfg.use_heightmap)
+    c = get_contact(state)
+    if cfg.use_heightmap and h is None:
+        raise ValueError(f"env.use_heightmap=true but {cfg.name!r} provides no obs['heightmap']")
+    return Spec(
+        obs_dim=obs_dim, prop_dim=obs_dim if prop is None else prop, act_dim=act_dim,
+        hmap_shape=None if h is None else tuple(h.shape[-2:]),
+        contact_dim=0 if c is None else int(c.shape[-1]),
+    )
+
+
 def make_env(cfg: EnvCfg):
     if cfg.name == "dummy":
-        return PointMassEnv(episode_length=cfg.episode_length)
+        return PointMassEnv(episode_length=cfg.episode_length, heightmap=cfg.use_heightmap)
     # Imported lazily so the dummy preset runs without MuJoCo installed.
     from mujoco_playground import registry, wrapper
 
@@ -40,6 +73,9 @@ def make_env(cfg: EnvCfg):
 
 # --------------------------------------------------------------------------------------
 # Point-mass sanity env: reach a random goal in 2D. Lets the full loop run on CPU.
+# Default obs is [pos, vel, goal - pos]. With heightmap=True the env mimics the asymmetric
+# setup: proprio is [pos, vel] only, the goal is visible as a bump on an 8x8 "terrain" heightmap
+# (and as privileged state goal - pos). It always reports 2 contact flags: pos pinned to a wall.
 # --------------------------------------------------------------------------------------
 @struct.dataclass
 class PMState:
@@ -57,13 +93,28 @@ class PMState:
 class PointMassEnv:
     action_size = 2
 
-    def __init__(self, episode_length: int = 200, dt: float = 0.05):
+    HMAP = 8
+
+    def __init__(self, episode_length: int = 200, dt: float = 0.05, heightmap: bool = False):
         self.episode_length = episode_length
         self.dt = dt
+        self.heightmap = heightmap
+        self._grid = jnp.linspace(-2.0, 2.0, self.HMAP)
+
+    def _obs(self, pos, vel, goal):
+        if not self.heightmap:
+            return jnp.concatenate([pos, vel, goal - pos], axis=-1)
+        gx = (self._grid[None, :, None] - goal[:, 0, None, None]) ** 2
+        gy = (self._grid[None, None, :] - goal[:, 1, None, None]) ** 2
+        return {
+            "state": jnp.concatenate([pos, vel], axis=-1),
+            "privileged_state": goal - pos,
+            "heightmap": jnp.exp(-(gx + gy) / 0.5),
+        }
 
     @staticmethod
-    def _obs(pos, vel, goal):
-        return jnp.concatenate([pos, vel, goal - pos], axis=-1)
+    def _contact(pos):
+        return (jnp.abs(pos) >= 1.99).astype(jnp.float32)
 
     def reset(self, rng: jax.Array) -> PMState:
         def one(k):
@@ -78,7 +129,7 @@ class PointMassEnv:
         zeros = jnp.zeros((n,), jnp.float32)
         return PMState(
             obs=self._obs(pos, vel, goal), reward=zeros, done=zeros,
-            info={"truncation": zeros}, pos=pos, vel=vel, goal=goal,
+            info={"truncation": zeros, "contact": self._contact(pos)}, pos=pos, vel=vel, goal=goal,
             t=jnp.zeros((n,), jnp.int32), rng=rng,
         )
 
@@ -86,6 +137,7 @@ class PointMassEnv:
         action = jnp.clip(action, -1.0, 1.0)
         vel = 0.95 * s.vel + 2.0 * self.dt * action
         pos = jnp.clip(s.pos + self.dt * vel, -2.0, 2.0)
+        contact = self._contact(pos)  # state after the step, before any auto-reset
         dist = jnp.linalg.norm(s.goal - pos, axis=-1)
         reward = -0.1 * dist - 0.01 * jnp.sum(action**2, -1) + 0.1 * (dist < 0.1)
         t = s.t + 1
@@ -100,5 +152,5 @@ class PointMassEnv:
         t = jnp.where(done > 0, 0, t)
         return PMState(
             obs=self._obs(pos, vel, goal), reward=reward, done=done,
-            info={"truncation": trunc}, pos=pos, vel=vel, goal=goal, t=t, rng=fresh.rng,
+            info={"truncation": trunc, "contact": contact}, pos=pos, vel=vel, goal=goal, t=t, rng=fresh.rng,
         )

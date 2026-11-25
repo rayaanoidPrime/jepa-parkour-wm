@@ -14,6 +14,8 @@ class EnvCfg:
     # Concatenate privileged sim state into the world-model input. Policies trained this way
     # cannot be deployed directly; see README ("Deployment caveat").
     use_privileged: bool = False
+    # Feed the env's heightmap / depth observation (obs["heightmap"], [H, W]) to the models.
+    use_heightmap: bool = False
 
 
 @dataclass
@@ -27,9 +29,14 @@ class WMCfg:
     cov_coef: float = 0.04         # VICReg covariance term
     reward_coef: float = 1.0
     cont_coef: float = 1.0
+    contact_coef: float = 1.0      # per-foot contact prediction (needs env info["contact"])
+    contact_pos_weight: float = 1.0    # upweight "in contact" flags in the BCE
+    contact_event_weight: float = 4.0  # extra weight on touchdown / liftoff transitions
+    student_coef: float = 1.0      # deployable-encoder distillation (only if ac.asymmetric)
     lr: float = 3e-4
     batch: int = 512
     grad_clip: float = 1.0
+    cnn_channels: int = 32         # heightmap CNN width (first conv; second is 2x)
 
 
 @dataclass
@@ -47,6 +54,9 @@ class ACCfg:
     min_std: float = 0.05
     max_std: float = 1.0
     grad_clip: float = 1.0
+    # Deployable actor: acts on a student encoder of proprioception (+ heightmap) only, trained to
+    # regress the privileged world-model latent. Imagination still uses the privileged latent.
+    asymmetric: bool = False
 
 
 @dataclass
@@ -60,6 +70,9 @@ class TrainCfg:
     warmup_iters: int = 10         # collect-only iterations before updates start
     log_every: int = 10
     ckpt_every: int = 1000
+    resume: str = ""               # checkpoint to continue from (full train state)
+    init_data: str = ""            # exported rollout dir to preload into the replay buffer
+    pretrain_updates: int = 0      # world-model-only iterations on init_data before the loop
     out_dir: str = "runs"
     wandb_project: str = "jepa-parkour-wm"
     wandb_entity: str = ""
@@ -78,12 +91,26 @@ class Config:
     def to_dict(self) -> dict:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "Config":
+        return cls(**{k: getattr(cls(), k).__class__(**v) for k, v in d.items()})
+
 
 PRESETS: dict[str, list[str]] = {
     # Seconds-long CPU/GPU check that the whole loop runs (no MuJoCo needed).
     "dummy": [
         "env.name=dummy", "env.num_envs=64", "env.episode_length=200",
         "wm.latent_dim=64", "wm.hidden=128", "wm.batch=64",
+        "ac.hidden=128", "ac.batch=128", "ac.horizon=16",
+        "train.iters=60", "train.collect_steps=16", "train.wm_updates=2",
+        "train.ac_updates=2", "train.replay_capacity=256", "train.warmup_iters=2",
+        "train.log_every=5", "train.ckpt_every=0",
+    ],
+    # Dummy env with every new piece on: heightmap, privileged WM input, contact head, student actor.
+    "dummy_full": [
+        "env.name=dummy", "env.num_envs=64", "env.episode_length=200",
+        "env.use_heightmap=true", "env.use_privileged=true", "ac.asymmetric=true",
+        "wm.latent_dim=64", "wm.hidden=128", "wm.batch=64", "wm.cnn_channels=8",
         "ac.hidden=128", "ac.batch=128", "ac.horizon=16",
         "train.iters=60", "train.collect_steps=16", "train.wm_updates=2",
         "train.ac_updates=2", "train.replay_capacity=256", "train.warmup_iters=2",

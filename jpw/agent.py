@@ -11,6 +11,7 @@ from flax import struct
 from jpw import replay
 from jpw.config import Config
 from jpw.models import Actor, Critic, WorldModel, sample_tanh, symlog
+from jpw.spec import Spec
 
 sg = jax.lax.stop_gradient
 
@@ -54,12 +55,16 @@ def lambda_returns(rew, cont, values, gamma, lam):
 
 
 class Agent:
-    def __init__(self, cfg: Config, obs_dim: int, act_dim: int):
-        self.cfg = cfg
-        self.obs_dim, self.act_dim = obs_dim, act_dim
+    def __init__(self, cfg: Config, spec: Spec):
+        self.cfg, self.spec = cfg, spec
         w, a = cfg.wm, cfg.ac
-        self.wm = WorldModel(w.latent_dim, w.hidden, w.depth)
-        self.actor = Actor(act_dim, a.hidden, a.depth, a.min_std, a.max_std)
+        self.asymmetric = a.asymmetric
+        self.wm = WorldModel(
+            w.latent_dim, w.hidden, w.depth, obs_dim=spec.obs_dim, prop_dim=spec.prop_dim,
+            use_hmap=spec.hmap_shape is not None, cnn_channels=w.cnn_channels,
+            contact_dim=spec.contact_dim, asymmetric=a.asymmetric,
+        )
+        self.actor = Actor(spec.act_dim, a.hidden, a.depth, a.min_std, a.max_std)
         self.critic = Critic(a.hidden, a.depth)
         self.wm_tx = optax.chain(optax.clip_by_global_norm(w.grad_clip), optax.adam(w.lr))
         self.actor_tx = optax.chain(optax.clip_by_global_norm(a.grad_clip), optax.adam(a.actor_lr))
@@ -68,25 +73,37 @@ class Agent:
     # ------------------------------------------------------------------ init
     def init(self, key: jax.Array) -> TrainState:
         k1, k2, k3 = jax.random.split(key, 3)
-        obs = jnp.zeros((1, self.obs_dim))
-        act = jnp.zeros((1, self.act_dim))
+        s = self.spec
+        obs = jnp.zeros((1, s.obs_dim))
+        act = jnp.zeros((1, s.act_dim))
+        hmap = None if s.hmap_shape is None else jnp.zeros((1, *s.hmap_shape))
         z = jnp.zeros((1, self.cfg.wm.latent_dim))
-        wm = self.wm.init(k1, obs, act)
+        wm = self.wm.init(k1, obs, act, hmap)
         actor = self.actor.init(k2, z)
         critic = self.critic.init(k3, z)
+        copy = lambda tree: jax.tree_util.tree_map(jnp.copy, tree)  # targets must not alias (donation)
         return TrainState(
-            wm=wm, wm_target=wm, actor=actor, critic=critic, critic_target=critic,
+            wm=wm, wm_target=copy(wm), actor=actor, critic=critic, critic_target=copy(critic),
             wm_opt=self.wm_tx.init(wm), actor_opt=self.actor_tx.init(actor),
             critic_opt=self.critic_tx.init(critic), ret_scale=jnp.ones(()),
         )
 
     # -------------------------------------------------------- model helpers
-    def encode(self, wm_params, obs):
-        return self.wm.apply(wm_params, obs, method=WorldModel.encode)
+    def encode(self, wm_params, obs, hmap=None):
+        return self.wm.apply(wm_params, obs, hmap, method=WorldModel.encode)
 
-    def act(self, ts: TrainState, obs, key):
-        z = self.encode(ts.wm, obs)
+    def policy_latent(self, wm_params, obs, hmap=None):
+        """Latent the *deployed* actor acts on: the student (proprio + heightmap only) if
+        asymmetric, otherwise the full world-model encoder."""
+        if self.asymmetric:
+            return self.wm.apply(wm_params, obs, hmap, method=WorldModel.student)
+        return self.encode(wm_params, obs, hmap)
+
+    def act(self, ts: TrainState, obs, key, hmap=None, deterministic=False):
+        z = self.policy_latent(ts.wm, obs, hmap)
         mean, std = self.actor.apply(ts.actor, z)
+        if deterministic:
+            return jnp.tanh(mean)
         a, _ = sample_tanh(mean, std, key)
         return a
 
@@ -95,20 +112,25 @@ class Agent:
         c = self.cfg.wm
         obs, act = batch["obs"], batch["act"]
         done, trunc, rew = batch["done"], batch["trunc"], batch["rew"]
+        hmap, contact = batch.get("hmap"), batch.get("contact")
+        has_contact = contact is not None and self.spec.contact_dim > 0
         k = obs.shape[1] - 1  # prediction steps
 
-        z0 = self.encode(wm_params, obs[:, 0])
-        target = sg(self.encode(target_params, obs[:, 1:]))  # [B, K, D]
+        z_all = self.encode(wm_params, obs, hmap)  # [B, K+1, D]
+        z0 = z_all[:, 0]
+        target = sg(self.encode(target_params, obs[:, 1:], None if hmap is None else hmap[:, 1:]))
 
         def body(z, a):
             z_next = self.wm.apply(wm_params, z, a, method=WorldModel.step)
             r = self.wm.apply(wm_params, z, a, method=WorldModel.reward_symlog)
             cl = self.wm.apply(wm_params, z, a, method=WorldModel.cont_logit)
-            return z_next, (z_next, r, cl, z)
+            ct = (self.wm.apply(wm_params, z, a, method=WorldModel.contact_logit)
+                  if has_contact else jnp.zeros(()))
+            return z_next, (z_next, r, cl, ct)
 
         acts = jnp.swapaxes(act[:, :k], 0, 1)
-        _, (z_pred, r_pred, c_logit, z_in) = jax.lax.scan(body, z0, acts)
-        z_pred, z_in = jnp.swapaxes(z_pred, 0, 1), jnp.swapaxes(z_in, 0, 1)  # [B, K, D]
+        _, (z_pred, r_pred, c_logit, ct_logit) = jax.lax.scan(body, z0, acts)
+        z_pred = jnp.swapaxes(z_pred, 0, 1)                                     # [B, K, D]
         r_pred, c_logit = r_pred.T, c_logit.T                                   # [B, K]
 
         # Transition k is inside the episode if no done occurred at steps 0..k-1;
@@ -126,12 +148,34 @@ class Agent:
         cont_l = jnp.sum(head_mask * cont_l) / jnp.maximum(head_mask.sum(), 1.0)
 
         loss = jepa + c.var_coef * var_l + c.cov_coef * cov_l + c.reward_coef * rew_l + c.cont_coef * cont_l
+        extra = {}
+        if has_contact:
+            ct_logit = jnp.swapaxes(ct_logit, 0, 1)                             # [B, K, C]
+            ct = contact[:, :k]
+            prev = jnp.concatenate([ct[:, :1], ct[:, :-1]], axis=1)
+            event = jnp.abs(ct - prev)                                          # touchdown / liftoff
+            w = (1.0 + (c.contact_pos_weight - 1.0) * ct) * (1.0 + c.contact_event_weight * event)
+            m = head_mask[..., None]
+            bce = optax.sigmoid_binary_cross_entropy(ct_logit, ct)
+            denom = jnp.maximum(m.sum() * ct.shape[-1], 1.0)
+            contact_l = jnp.sum(m * w * bce) / denom
+            hit = ((ct_logit > 0) == (ct > 0.5)).astype(jnp.float32)
+            extra["wm/contact"] = contact_l
+            extra["wm/contact_acc"] = jnp.sum(m * hit) / denom
+            extra["wm/contact_event_acc"] = jnp.sum(m * event * hit) / jnp.maximum(jnp.sum(m * event), 1.0)
+            loss = loss + c.contact_coef * contact_l
+        if self.asymmetric:
+            z_s = self.wm.apply(wm_params, obs, hmap, method=WorldModel.student)
+            student_l = jnp.mean((z_s - sg(z_all)) ** 2)
+            extra["wm/student"] = student_l
+            loss = loss + c.student_coef * student_l
         per_step = jnp.sum(alive * err, 0) / jnp.maximum(alive.sum(0), 1.0)
         metrics = {
             "wm/loss": loss, "wm/jepa": jepa, "wm/vicreg_var": var_l, "wm/vicreg_cov": cov_l,
             "wm/reward": rew_l, "wm/cont": cont_l,
             "wm/pred_err_k1": per_step[0], "wm/pred_err_kK": per_step[-1],
             "wm/latent_std": jnp.mean(jnp.std(z0, axis=0)),
+            **extra,
         }
         return loss, metrics
 
@@ -144,9 +188,9 @@ class Agent:
         return ts.replace(wm=wm, wm_target=target, wm_opt=opt), m
 
     # ------------------------------------------ actor-critic in imagination
-    def ac_update(self, ts: TrainState, obs0, key) -> tuple[TrainState, dict]:
+    def ac_update(self, ts: TrainState, obs0, key, hmap0=None) -> tuple[TrainState, dict]:
         c = self.cfg.ac
-        z0 = sg(self.encode(ts.wm, obs0))
+        z0 = sg(self.encode(ts.wm, obs0, hmap0))
 
         def actor_loss(actor_params):
             keys = jax.random.split(key, c.horizon)
@@ -157,11 +201,16 @@ class Agent:
                 r = self.wm.apply(ts.wm, z, a, method=WorldModel.reward)
                 cont = jax.nn.sigmoid(self.wm.apply(ts.wm, z, a, method=WorldModel.cont_logit))
                 z_next = self.wm.apply(ts.wm, z, a, method=WorldModel.step)
-                return z_next, (z, r, cont, logp)
+                if self.spec.contact_dim:
+                    p_ct = jnp.mean(jax.nn.sigmoid(
+                        self.wm.apply(ts.wm, z, a, method=WorldModel.contact_logit)))
+                else:
+                    p_ct = jnp.zeros(())
+                return z_next, (z, r, cont, logp, p_ct)
 
             # Gradients flow from returns back through the frozen world model into the actions
             # (analytic policy gradients, as in Dreamer / SHAC / SuperMimic).
-            z_last, (zs, rs, cs, logps) = jax.lax.scan(body, z0, keys)
+            z_last, (zs, rs, cs, logps, p_cts) = jax.lax.scan(body, z0, keys)
             z_all = jnp.concatenate([zs, z_last[None]], 0)
             values = self.critic.apply(ts.critic_target, z_all)
             rets = lambda_returns(rs, cs, values, c.gamma, c.lam)  # [H, B]
@@ -174,7 +223,7 @@ class Agent:
             aux = {
                 "zs": sg(zs), "rets": sg(rets), "weight": weight, "spread": spread,
                 "entropy": jnp.mean(entropy), "ret_mean": jnp.mean(rets), "imag_reward": jnp.mean(rs),
-                "imag_cont": jnp.mean(cs),
+                "imag_cont": jnp.mean(cs), "imag_contact": jnp.mean(sg(p_cts)),
             }
             return loss, aux
 
@@ -195,7 +244,8 @@ class Agent:
         m = {
             "ac/actor_loss": a_loss, "ac/critic_loss": c_loss, "ac/entropy": aux["entropy"],
             "ac/imag_return": aux["ret_mean"], "ac/imag_reward": aux["imag_reward"],
-            "ac/imag_cont": aux["imag_cont"], "ac/ret_scale": ret_scale,
+            "ac/imag_cont": aux["imag_cont"], "ac/imag_contact": aux["imag_contact"],
+            "ac/ret_scale": ret_scale,
             "ac/actor_grad_norm": optax.global_norm(g_a),
         }
         ts = ts.replace(actor=actor, actor_opt=actor_opt, critic=critic,
@@ -214,10 +264,21 @@ class Agent:
 
         def ac_body(ts, k):
             k_s, k_i = jax.random.split(k)
-            obs0 = replay.sample(rb, k_s, self.cfg.ac.batch, 1)["obs"][:, 0]
-            return self.ac_update(ts, obs0, k_i)
+            b = replay.sample(rb, k_s, self.cfg.ac.batch, 1)
+            hmap0 = b["hmap"][:, 0] if "hmap" in b else None
+            return self.ac_update(ts, b["obs"][:, 0], k_i, hmap0)
 
         ts, wm_m = jax.lax.scan(wm_body, ts, jax.random.split(k_wm, t.wm_updates))
         ts, ac_m = jax.lax.scan(ac_body, ts, jax.random.split(k_ac, t.ac_updates))
         metrics = jax.tree_util.tree_map(jnp.mean, {**wm_m, **ac_m})
         return ts, metrics
+
+    def pretrain(self, ts: TrainState, rb: replay.Replay, key: jax.Array) -> tuple[TrainState, dict]:
+        """World-model-only updates (stage 1: offline pretraining on exported rollouts)."""
+        seq_len = self.cfg.wm.pred_horizon + 1
+
+        def wm_body(ts, k):
+            return self.wm_update(ts, replay.sample(rb, k, self.cfg.wm.batch, seq_len))
+
+        ts, m = jax.lax.scan(wm_body, ts, jax.random.split(key, self.cfg.train.wm_updates))
+        return ts, jax.tree_util.tree_map(jnp.mean, m)

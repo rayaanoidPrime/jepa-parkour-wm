@@ -39,6 +39,7 @@ actor that uses only proprioception and depth.
 scripts/remote.sh submit --preset dummy      # whole loop on a point-mass env (no MuJoCo)
 scripts/remote.sh submit --preset smoke      # 256 MJX envs, 50 iterations
 scripts/remote.sh submit --set env.num_envs=4096 train.iters=20000 train.wandb_group=go1-rough
+scripts/remote.sh submit --preset dummy_full # + heightmap, contact head, deployable student actor
 scripts/remote.sh status | logs [JOB_ID] | cancel JOB_ID
 scripts/remote.sh wandb-sync                 # if compute nodes ran W&B offline
 ```
@@ -52,3 +53,21 @@ Key W&B metrics:
 - `ac/imag_return`.
 - `env/ep_return` and `env/reward_per_step`: the policy's real simulator performance.
 - `perf/env_sps`.
+
+## Observations, contact, deployable actor
+
+- **Heightmap / depth:** an env that returns `obs["heightmap"]` (`[N, H, W]`) is used with
+  `env.use_heightmap=true`. A small CNN encodes it next to the proprio vector. It is stored in the replay
+  buffer in bfloat16.
+- **Contact head:** if `state.info["contact"]` (`[N, C]`, flags after the step) exists, the world model
+  predicts it from `(z, a)`. Touchdown and liftoff steps get extra weight (`wm.contact_event_weight`).
+  Metrics: `wm/contact`, `wm/contact_acc`, `wm/contact_event_acc`.
+- **Deployable actor:** `ac.asymmetric=true` makes the actor act on a student encoder that sees proprio
+  (`obs[..., :prop_dim]`) and the heightmap only. It is trained to regress the privileged world-model
+  latent (`wm/student`). Imagination still uses the privileged latent. Collection acts through the student.
+- **Rollout export:** `python -m jpw.export --out data/x --steps 2000 [--ckpt ...]` writes `.npz` shards.
+  `train.init_data=data/x train.pretrain_updates=500` preloads them and pretrains the world model offline.
+- **Checkpoints:** full train state. `train.resume=path` continues a run and `jpw.checkpoint.load` rebuilds
+  `(cfg, spec, agent, state)`. A `ckpt_final.pkl` is written when `train.ckpt_every > 0`.
+
+Tests (CPU, point-mass env): `uv pip install -e ".[test]" && pytest tests`.
