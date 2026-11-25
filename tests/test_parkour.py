@@ -72,7 +72,8 @@ def test_hfield_matches_jax_ground_height():
     xs = pk.grid_x()
     rng = np.random.default_rng(0)
     checked = 0
-    for x in rng.uniform(-1.0, 20.0, 400):
+    floor = model.geom("floor").id
+    for x in rng.uniform(1.0, 20.0, 400):  # beyond the robot, which sits at the origin
         i = int(np.argmin(np.abs(xs - x)))
         if i < 3 or i > len(xs) - 4 or np.ptp(prof[i - 3:i + 4]) > 1e-6:
             continue  # skip points near a step edge (bilinear vs triangle prisms differ there)
@@ -80,7 +81,7 @@ def test_hfield_matches_jax_ground_height():
         geomid = np.zeros(1, np.int32)
         dist = mujoco.mj_ray(model, data, np.array([x, y, 5.0]), np.array([0.0, 0.0, -1.0]),
                              None, 1, -1, geomid)
-        assert dist > 0
+        assert dist > 0 and geomid[0] == floor
         got = float(pk.ground_height(jnp.asarray(elev), jnp.float32(x), jnp.float32(y)))
         assert abs((5.0 - dist) - got) < 2e-3, (x, y, 5.0 - dist, got)
         checked += 1
