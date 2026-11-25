@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jpw"
+version = "0.1.0"
+description = "JEPA world model + policy learning in imagination for legged locomotion/parkour"
+requires-python = ">=3.10"
+# jax itself is installed separately so the ROCm (or CUDA) build matches the machine.
+dependencies = ["flax", "optax", "numpy"]
+
+[project.optional-dependencies]
+sim = ["mujoco", "mujoco-mjx", "playground"]
+track = ["wandb"]
+
+[tool.setuptools.packages.find]
+include = ["jpw*"]
