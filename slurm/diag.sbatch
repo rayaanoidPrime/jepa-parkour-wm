@@ -13,6 +13,8 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR}"
 [ -f cluster.env ] && source cluster.env
 source "${JPW_VENV:-$HOME/venvs/jpw}/bin/activate"
-export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_command_buffer="
+# Triton GEMM kernels return wrong results on this ROCm stack (MJX gets NaNs on ~75% of envs; see
+# slurm/diag_sweep.sbatch), so turn them off.
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_command_buffer= --xla_gpu_enable_triton_gemm=false"
 export MUJOCO_GL="${MUJOCO_GL:-disable}"
 python -u scripts/diag_mjx.py "${1:-Go1JoystickRoughTerrain}" "${2:-256}"

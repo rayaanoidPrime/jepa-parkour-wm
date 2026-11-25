@@ -23,7 +23,9 @@ source "${JPW_VENV:-$HOME/venvs/jpw}/bin/activate"
 
 # JAX on ROCm: avoid XLA command buffers (per AMD's MJX guide). Training never renders, and
 # MUJOCO_GL=egl segfaults on import on this cluster, so disable MuJoCo's GL entirely.
-export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_command_buffer="
+# Triton GEMM kernels return wrong results on this ROCm stack (MJX gets NaNs on ~75% of envs; see
+# slurm/diag_sweep.sbatch), so turn them off.
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_command_buffer= --xla_gpu_enable_triton_gemm=false"
 export MUJOCO_GL="${MUJOCO_GL:-disable}"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.85}"
 
