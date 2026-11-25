@@ -15,6 +15,8 @@ cd "${SLURM_SUBMIT_DIR}"
 [ -f cluster.env ] && source cluster.env
 source "${JPW_VENV:-$HOME/venvs/jpw}/bin/activate"
 export MUJOCO_GL="${MUJOCO_GL:-disable}"
+# W&B host: your runs live on wandb.ai (newer wandb defaults to another host).
+export WANDB_BASE_URL="${WANDB_BASE_URL:-https://api.wandb.ai}"
 ENV="${1:-Go1JoystickRoughTerrain}"
 N="${2:-256}"
 BASE="--xla_gpu_enable_command_buffer="

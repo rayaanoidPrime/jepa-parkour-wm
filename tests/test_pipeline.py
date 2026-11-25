@@ -125,3 +125,13 @@ def test_spec_mismatch_is_rejected(tmp_path):
     checkpoint.save(path, cfg, spec, ts, it=0, env_steps=0)
     with pytest.raises(ValueError, match="was made for"):
         _run(tmp_path / "x", "dummy", [f"train.resume={path}"])
+
+
+def test_eval_runs_on_checkpoint(tmp_path, capsys):
+    from jpw import eval as jeval
+
+    run = _run(tmp_path, "dummy_full", ["train.ckpt_every=4"])
+    res = jeval.main(["--ckpt", str(run / "ckpt_final.pkl"), "--num-envs", "16", "--episodes", "16",
+                      "--set", "env.episode_length=20"])
+    assert res["episodes"] >= 16 and res["length"] == 20 and np.isfinite(res["return"])
+    assert "EVAL" in capsys.readouterr().out

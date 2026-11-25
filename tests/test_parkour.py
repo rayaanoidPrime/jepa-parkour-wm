@@ -117,3 +117,41 @@ def test_leaving_the_lane_ends_the_episode(parkour_env):
     inner = inner.replace(data=inner.data.replace(qpos=q))
     out = jax.jit(env.env.step)(inner, jnp.zeros((cfg.num_envs, env.action_size)))
     assert float(out.done.min()) == 1.0
+
+
+def _find(env, attr):
+    w = env
+    while not hasattr(w, attr):
+        w = w.env
+    return getattr(w, attr)
+
+
+@requires_sim
+def test_domain_randomization_varies_per_env():
+    from jpw.config import EnvCfg
+    from jpw.envs import make_env
+
+    cfg = EnvCfg(name="Go1Parkour", num_envs=4, episode_length=20, use_heightmap=True,
+                 domain_randomization=True)
+    env = make_env(cfg)
+    model_v = _find(env, "_mjx_model_v")
+    assert model_v.geom_friction.shape[0] == 4 and model_v.actuator_gainprm.shape[0] == 4
+    assert model_v.geom_friction[:, 0, 0].std() > 0 and model_v.actuator_gainprm[:, 0, 0].std() > 0
+    base = _find(env, "unwrapped") if hasattr(_find(env, "unwrapped"), "mj_model") else None
+    assert base is not None and base.mj_model.geom("floor").id == 0 and base.mj_model.body("trunk").id == 1
+    st = jax.jit(env.reset)(jax.random.split(jax.random.PRNGKey(0), 4))
+    st = jax.jit(env.step)(st, jnp.zeros((4, env.action_size)))
+    assert bool(jnp.all(jnp.isfinite(st.reward)))
+
+
+@requires_sim
+def test_heightmap_noise_is_applied_and_optional():
+    from jpw.config import EnvCfg
+    from jpw.envs import make_env
+
+    keys = jax.random.split(jax.random.PRNGKey(0), 8)
+    base = dict(name="Go1Parkour", num_envs=8, use_heightmap=True)
+    clean = jax.jit(make_env(EnvCfg(**base)).reset)(keys).obs["heightmap"]
+    noisy = jax.jit(make_env(EnvCfg(**base, hmap_noise=0.02)).reset)(keys).obs["heightmap"]
+    diff = np.asarray(noisy - clean)
+    assert 0.005 < diff.std() < 0.06, diff.std()

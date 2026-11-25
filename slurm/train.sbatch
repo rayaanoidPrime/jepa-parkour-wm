@@ -27,6 +27,8 @@ source "${JPW_VENV:-$HOME/venvs/jpw}/bin/activate"
 # slurm/diag_sweep.sbatch), so turn them off.
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_command_buffer= --xla_gpu_enable_triton_gemm=false"
 export MUJOCO_GL="${MUJOCO_GL:-disable}"
+# W&B host: your runs live on wandb.ai (newer wandb defaults to another host).
+export WANDB_BASE_URL="${WANDB_BASE_URL:-https://api.wandb.ai}"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.85}"
 
 # W&B: log live when the node can reach wandb, otherwise offline (sync later with scripts/wandb_sync.sh).

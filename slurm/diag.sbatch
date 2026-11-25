@@ -17,4 +17,6 @@ source "${JPW_VENV:-$HOME/venvs/jpw}/bin/activate"
 # slurm/diag_sweep.sbatch), so turn them off.
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_command_buffer= --xla_gpu_enable_triton_gemm=false"
 export MUJOCO_GL="${MUJOCO_GL:-disable}"
+# W&B host: your runs live on wandb.ai (newer wandb defaults to another host).
+export WANDB_BASE_URL="${WANDB_BASE_URL:-https://api.wandb.ai}"
 python -u scripts/diag_mjx.py "${1:-Go1JoystickRoughTerrain}" "${2:-256}"

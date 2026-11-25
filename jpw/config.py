@@ -19,6 +19,10 @@ class EnvCfg:
     # Go1Parkour only: obstacle course seed and difficulty in (0, 1] (step height, gap width).
     terrain_seed: int = 0
     terrain_difficulty: float = 1.0
+    # Go1 envs: per-env dynamics randomisation (friction, masses, COM, joint friction/armature,
+    # nominal pose, motor strength), and Gaussian heightmap noise std in metres (0 = off).
+    domain_randomization: bool = False
+    hmap_noise: float = 0.0
 
 
 @dataclass
@@ -123,12 +127,14 @@ PRESETS: dict[str, list[str]] = {
     "parkour_smoke": [
         "env.name=Go1Parkour", "env.num_envs=256", "env.use_heightmap=true",
         "env.use_privileged=true", "ac.asymmetric=true",
+        "env.domain_randomization=true", "env.hmap_noise=0.01",
         "train.iters=50", "train.replay_capacity=400", "train.warmup_iters=5",
         "train.log_every=5", "train.ckpt_every=0",
     ],
     "parkour": [
         "env.name=Go1Parkour", "env.num_envs=2048", "env.use_heightmap=true",
         "env.use_privileged=true", "ac.asymmetric=true",
+        "env.domain_randomization=true", "env.hmap_noise=0.01",
     ],
     # Small real-simulator run to validate MJX + ROCm + W&B on one GPU.
     "smoke": [

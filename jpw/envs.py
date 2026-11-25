@@ -74,8 +74,16 @@ def make_env(cfg: EnvCfg):
             hmap_fn = parkour.make_heightmap_fn(elev)
     else:
         env = registry.load(cfg.name)
-    env = wrapper.wrap_for_brax_training(env, episode_length=cfg.episode_length, action_repeat=1)
-    return PlaygroundAdapter(env, hmap_fn)
+    rand_fn = None
+    if cfg.domain_randomization:
+        if not cfg.name.startswith("Go1"):
+            raise ValueError(f"env.domain_randomization is only implemented for Go1 envs, not {cfg.name!r}")
+        from jpw.randomize import make_randomization_fn
+
+        rand_fn = make_randomization_fn(cfg.num_envs, seed=cfg.terrain_seed)
+    env = wrapper.wrap_for_brax_training(env, episode_length=cfg.episode_length, action_repeat=1,
+                                         randomization_fn=rand_fn)
+    return PlaygroundAdapter(env, hmap_fn, cfg.hmap_noise)
 
 
 PARKOUR_ENV = "Go1Parkour"
@@ -85,14 +93,15 @@ class PlaygroundAdapter:
     """Adds what the models consume on top of a (brax-wrapped) Playground env:
 
     info["contact"]     = info["last_contact"] as float32 (per-foot contact after the step)
-    obs["heightmap"]    = hmap_fn(data.qpos), if given
+    obs["heightmap"]    = hmap_fn(data.qpos), if given, plus Gaussian noise (std `hmap_noise`
+                          metres per cell) and a per-sample height bias of the same std
 
     Extras are stripped before calling the wrapped env so its auto-reset sees the structure it
     created.
     """
 
-    def __init__(self, env, hmap_fn=None):
-        self.env, self.hmap_fn = env, hmap_fn
+    def __init__(self, env, hmap_fn=None, hmap_noise: float = 0.0):
+        self.env, self.hmap_fn, self.hmap_noise = env, hmap_fn, hmap_noise
         self.action_size = env.action_size
 
     def __getattr__(self, name):  # forward anything else (dt, mj_model, ...)
@@ -104,7 +113,14 @@ class PlaygroundAdapter:
             info["contact"] = info["last_contact"].astype(jnp.float32)
         obs = state.obs
         if self.hmap_fn is not None:
-            obs = {**obs, "heightmap": self.hmap_fn(state.data.qpos)}
+            hm = self.hmap_fn(state.data.qpos)
+            if self.hmap_noise > 0:
+                def noise(key):  # key: this env's rng (advanced by the env every step)
+                    k1, k2 = jax.random.split(jax.random.fold_in(key, 7))
+                    return self.hmap_noise * (jax.random.normal(k1, hm.shape[-2:])
+                                              + jax.random.normal(k2, ()))
+                hm = hm + jax.vmap(noise)(state.info["rng"])
+            obs = {**obs, "heightmap": hm}
         return state.replace(info=info, obs=obs)
 
     def _strip(self, state):
