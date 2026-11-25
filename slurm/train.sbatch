@@ -21,9 +21,10 @@ if [ -n "${JPW_MODULES:-}" ]; then
 fi
 source "${JPW_VENV:-$HOME/venvs/jpw}/bin/activate"
 
-# JAX on ROCm: avoid XLA command buffers (per AMD's MJX guide) and keep MuJoCo headless.
+# JAX on ROCm: avoid XLA command buffers (per AMD's MJX guide). Training never renders, and
+# MUJOCO_GL=egl segfaults on import on this cluster, so disable MuJoCo's GL entirely.
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_command_buffer="
-export MUJOCO_GL="${MUJOCO_GL:-egl}"
+export MUJOCO_GL="${MUJOCO_GL:-disable}"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.85}"
 
 # W&B: log live when the node can reach wandb, otherwise offline (sync later with scripts/wandb_sync.sh).
