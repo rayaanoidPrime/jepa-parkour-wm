@@ -71,3 +71,21 @@ Key W&B metrics:
   `(cfg, spec, agent, state)`. A `ckpt_final.pkl` is written when `train.ckpt_every > 0`.
 
 Tests (CPU, point-mass env): `uv pip install -e ".[test]" && pytest tests`.
+
+## Multi-GPU and bigger batches
+
+`train.num_devices=N` (0 = every allocated GPU) runs data-parallel on one node: envs and the replay
+buffer are sharded along the env axis, parameters are replicated, and gradients are averaged across
+GPUs. `env.num_envs`, `wm.batch` and `ac.batch` are global and are split evenly, so scale them with the
+GPU count (they must divide evenly). Slurm flags override the script defaults:
+
+```bash
+sbatch --gres=gpu:4 --cpus-per-task=32 --mem=256G slurm/train.sbatch --preset parkour_mgpu
+# or through remote.sh:  JPW_SBATCH_ARGS="--gres=gpu:4 --cpus-per-task=32 --mem=256G" scripts/remote.sh submit --preset parkour_mgpu
+```
+
+`parkour_mgpu` is 2048 envs and 512 / 1024 wm / actor batch per GPU for 4 GPUs. For a different
+GPU count, set `env.num_envs`, `wm.batch` and `ac.batch` to the per-GPU values times that count.
+The log prints `replica sync check` at the end; it should be 0.
+
+Note the VICReg variance / covariance terms are computed on each device's local batch.

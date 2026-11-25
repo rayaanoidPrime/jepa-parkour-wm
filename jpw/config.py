@@ -69,6 +69,9 @@ class ACCfg:
 @dataclass
 class TrainCfg:
     seed: int = 0
+    # GPUs for data parallelism (see jpw.parallel). 1 = single device, 0 = all visible devices.
+    # Batch sizes (wm.batch, ac.batch) and env.num_envs are global and must divide evenly.
+    num_devices: int = 1
     iters: int = 20000
     collect_steps: int = 24        # env steps per env per iteration
     wm_updates: int = 8            # world-model gradient steps per iteration
@@ -135,6 +138,14 @@ PRESETS: dict[str, list[str]] = {
         "env.name=Go1Parkour", "env.num_envs=2048", "env.use_heightmap=true",
         "env.use_privileged=true", "ac.asymmetric=true",
         "env.domain_randomization=true", "env.hmap_noise=0.01",
+    ],
+    # Multi-GPU parkour: run with e.g.  sbatch --gres=gpu:4 --cpus-per-task=32 --mem=256G
+    # slurm/train.sbatch --preset parkour_mgpu   (uses every allocated GPU; 2048 envs and
+    # 512 / 1024 wm / ac batch per GPU)
+    "parkour_mgpu": [
+        "env.name=Go1Parkour", "env.use_heightmap=true", "env.use_privileged=true",
+        "ac.asymmetric=true", "env.domain_randomization=true", "env.hmap_noise=0.01",
+        "train.num_devices=0", "env.num_envs=8192", "wm.batch=2048", "ac.batch=4096",
     ],
     # Small real-simulator run to validate MJX + ROCm + W&B on one GPU.
     "smoke": [

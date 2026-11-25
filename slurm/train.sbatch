@@ -2,6 +2,7 @@
 # Train the JEPA world model + policy on one AMD GPU. Submit with scripts/submit.sh, or on the
 # cluster:  sbatch slurm/train.sbatch --preset smoke
 # Extra sbatch flags (partition, account, time) go in cluster.env as JPW_SBATCH_ARGS.
+# Multi-GPU: sbatch --gres=gpu:4 --cpus-per-task=32 --mem=256G slurm/train.sbatch --preset parkour_mgpu
 #SBATCH --job-name=jpw
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

@@ -81,12 +81,18 @@ def from_arrays(arrays: dict, capacity: int, spec: Spec) -> Replay:
 
     Keeps the most recent `capacity` rows if there are more.
     """
-    t, n = arrays["obs"].shape[:2]
-    rb = init(capacity, n, spec)
-    for lo in range(max(0, t - capacity), t, 256):
-        hi = min(lo + 256, t)
-        rb = add_chunk(rb, {k: jnp.asarray(v[lo:hi]) for k, v in arrays.items() if k in FIELDS})
+    rb = init(capacity, arrays["obs"].shape[1], spec)
+    for chunk in chunks(arrays, capacity):
+        rb = add_chunk(rb, {k: jnp.asarray(v) for k, v in chunk.items()})
     return rb
+
+
+def chunks(arrays: dict, capacity: int, size: int = 256):
+    """Yield the most recent `capacity` rows of time-major arrays, in time order, `size` at a time."""
+    t = arrays["obs"].shape[0]
+    for lo in range(max(0, t - capacity), t, size):
+        hi = min(lo + size, t)
+        yield {k: v[lo:hi] for k, v in arrays.items() if k in FIELDS}
 
 
 def to_numpy(chunk: dict) -> dict:

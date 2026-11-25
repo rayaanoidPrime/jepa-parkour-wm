@@ -57,6 +57,11 @@ def lambda_returns(rew, cont, values, gamma, lam):
 class Agent:
     def __init__(self, cfg: Config, spec: Spec):
         self.cfg, self.spec = cfg, spec
+        # Data parallelism: set by jpw.parallel when update/pretrain run inside shard_map. Batch
+        # sizes in the config are global; each device uses batch // ndev and gradients are
+        # averaged over `axis`.
+        self.axis: str | None = None
+        self.ndev = 1
         w, a = cfg.wm, cfg.ac
         self.asymmetric = a.asymmetric
         self.wm = WorldModel(
@@ -87,6 +92,14 @@ class Agent:
             wm_opt=self.wm_tx.init(wm), actor_opt=self.actor_tx.init(actor),
             critic_opt=self.critic_tx.init(critic), ret_scale=jnp.ones(()),
         )
+
+    def _pmean(self, x):
+        return jax.lax.pmean(x, self.axis) if self.axis else x
+
+    def _local(self, batch: int) -> int:
+        if batch % self.ndev:
+            raise ValueError(f"batch size {batch} must be divisible by the number of devices {self.ndev}")
+        return batch // self.ndev
 
     # -------------------------------------------------------- model helpers
     def encode(self, wm_params, obs, hmap=None):
@@ -181,6 +194,7 @@ class Agent:
 
     def wm_update(self, ts: TrainState, batch) -> tuple[TrainState, dict]:
         (_, m), g = jax.value_and_grad(self.wm_loss, has_aux=True)(ts.wm, ts.wm_target, batch)
+        g, m = self._pmean(g), self._pmean(m)
         upd, opt = self.wm_tx.update(g, ts.wm_opt, ts.wm)
         wm = optax.apply_updates(ts.wm, upd)
         target = optax.incremental_update(wm, ts.wm_target, 1.0 - self.cfg.wm.target_ema)
@@ -228,6 +242,8 @@ class Agent:
             return loss, aux
 
         (a_loss, aux), g_a = jax.value_and_grad(actor_loss, has_aux=True)(ts.actor)
+        g_a = self._pmean(g_a)
+        aux["spread"] = self._pmean(aux["spread"])  # keeps ret_scale identical on every device
         upd, actor_opt = self.actor_tx.update(g_a, ts.actor_opt, ts.actor)
         actor = optax.apply_updates(ts.actor, upd)
 
@@ -236,6 +252,7 @@ class Agent:
             return jnp.mean(aux["weight"] * (v - aux["rets"]) ** 2)
 
         c_loss, g_c = jax.value_and_grad(critic_loss)(ts.critic)
+        g_c = self._pmean(g_c)
         upd, critic_opt = self.critic_tx.update(g_c, ts.critic_opt, ts.critic)
         critic = optax.apply_updates(ts.critic, upd)
         critic_target = optax.incremental_update(critic, ts.critic_target, 1.0 - c.critic_ema)
@@ -248,6 +265,7 @@ class Agent:
             "ac/ret_scale": ret_scale,
             "ac/actor_grad_norm": optax.global_norm(g_a),
         }
+        m = self._pmean(m)
         ts = ts.replace(actor=actor, actor_opt=actor_opt, critic=critic,
                         critic_opt=critic_opt, critic_target=critic_target, ret_scale=ret_scale)
         return ts, m
@@ -255,16 +273,19 @@ class Agent:
     # ------------------------------------------------------- fused update
     def update(self, ts: TrainState, rb: replay.Replay, key: jax.Array) -> tuple[TrainState, dict]:
         t = self.cfg.train
+        if self.axis:  # same key on every device -> decorrelate the local samples
+            key = jax.random.fold_in(key, jax.lax.axis_index(self.axis))
         k_wm, k_ac = jax.random.split(key)
         seq_len = self.cfg.wm.pred_horizon + 1
+        wm_batch, ac_batch = self._local(self.cfg.wm.batch), self._local(self.cfg.ac.batch)
 
         def wm_body(ts, k):
-            batch = replay.sample(rb, k, self.cfg.wm.batch, seq_len)
+            batch = replay.sample(rb, k, wm_batch, seq_len)
             return self.wm_update(ts, batch)
 
         def ac_body(ts, k):
             k_s, k_i = jax.random.split(k)
-            b = replay.sample(rb, k_s, self.cfg.ac.batch, 1)
+            b = replay.sample(rb, k_s, ac_batch, 1)
             hmap0 = b["hmap"][:, 0] if "hmap" in b else None
             return self.ac_update(ts, b["obs"][:, 0], k_i, hmap0)
 
@@ -275,10 +296,13 @@ class Agent:
 
     def pretrain(self, ts: TrainState, rb: replay.Replay, key: jax.Array) -> tuple[TrainState, dict]:
         """World-model-only updates (stage 1: offline pretraining on exported rollouts)."""
+        if self.axis:
+            key = jax.random.fold_in(key, jax.lax.axis_index(self.axis))
         seq_len = self.cfg.wm.pred_horizon + 1
+        wm_batch = self._local(self.cfg.wm.batch)
 
         def wm_body(ts, k):
-            return self.wm_update(ts, replay.sample(rb, k, self.cfg.wm.batch, seq_len))
+            return self.wm_update(ts, replay.sample(rb, k, wm_batch, seq_len))
 
         ts, m = jax.lax.scan(wm_body, ts, jax.random.split(key, self.cfg.train.wm_updates))
         return ts, jax.tree_util.tree_map(jnp.mean, m)

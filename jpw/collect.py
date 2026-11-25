@@ -9,13 +9,14 @@ from jpw.envs import get_contact, get_hmap, get_obs
 
 
 def make_collect(env, agent: Agent, n_steps: int, use_priv: bool, use_hmap: bool = False,
-                 random_policy: bool = False):
+                 random_policy: bool = False, par=None):
     """Returns collect(ts, env_state, key, ep_ret) -> (env_state, key, ep_ret, chunk).
 
     `chunk` is a dict of time-major arrays [n_steps, N, ...] in replay layout, plus per-step
     finished-episode return sums/counts ("fin_sum", "fin_cnt"). The acting latent is the one the
     deployed actor sees (student encoder when ac.asymmetric). With random_policy the actor is
     ignored and actions are uniform in [-1, 1] (use it to export data before any policy exists).
+    With `par` (a jpw.parallel.Parallel) the envs / outputs are kept sharded over the mesh.
     """
     act_dim = agent.spec.act_dim
 
@@ -47,6 +48,10 @@ def make_collect(env, agent: Agent, n_steps: int, use_priv: bool, use_hmap: bool
             return (nxt, key, ep_ret), out
 
         (es, key, ep_ret), out = jax.lax.scan(body, (env_state, key, ep_ret), None, length=n_steps)
+        if par is not None:
+            n = ep_ret.shape[0]
+            es, ep_ret = par.constrain_env((es, ep_ret), n)
+            out = par.constrain_time(out)
         return es, key, ep_ret, out
 
     return jax.jit(collect)
