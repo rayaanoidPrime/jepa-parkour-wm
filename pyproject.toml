@@ -7,11 +7,13 @@ name = "jpw"
 version = "0.1.0"
 description = "JEPA world model + policy learning in imagination for legged locomotion/parkour"
 requires-python = ">=3.10"
-# jax itself is installed separately so the ROCm (or CUDA) build matches the machine.
+# jax itself comes from an extra so the build matches the machine (rocm60 = system ROCm 6.x).
 dependencies = ["flax", "optax", "numpy"]
 
 [project.optional-dependencies]
-sim = ["mujoco", "mujoco-mjx", "playground"]
+# Pinned to the last JAX release with a ROCm 6.x plugin (matches the cluster's ROCm 6.2.4).
+rocm60 = ["jax==0.5.0", "jaxlib==0.5.0", "jax-rocm60-plugin==0.5.0", "jax-rocm60-pjrt==0.5.0"]
+sim = ["mujoco==3.3.7", "mujoco-mjx==3.3.7", "playground==0.0.5"]
 track = ["wandb"]
 
 [tool.setuptools.packages.find]

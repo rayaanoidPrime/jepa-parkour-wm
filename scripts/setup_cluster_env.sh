@@ -1,40 +1,31 @@
 #!/usr/bin/env bash
-# One-time, bare-metal (no container) Python env on the cluster. Run on a login node from the
-# repo root:  bash scripts/setup_cluster_env.sh      (or remotely: scripts/remote.sh setup)
+# One-time, bare-metal (no container) Python env on the cluster, managed with uv. Run on a login
+# node from the repo root:  bash scripts/setup_cluster_env.sh   (or remotely: scripts/remote.sh setup)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -f cluster.env ] && source cluster.env
 
 VENV="${JPW_VENV:-$HOME/venvs/jpw}"
-PY="${JPW_PYTHON:-python3}"
-# JAX extra matching the cluster's ROCm install; "rocm7-local" uses the system ROCm (/opt/rocm).
-JAX_EXTRA="${JPW_JAX_EXTRA:-rocm7-local}"
+PY="${JPW_PYTHON:-3.12}"
+# pyproject extra that provides jax for this machine's ROCm (rocm60 = ROCm 6.x).
+JAX_EXTRA="${JPW_JAX_EXTRA:-rocm60}"
+export PATH="$HOME/.local/bin:$PATH"
 
 if [ -n "${JPW_MODULES:-}" ]; then
   # shellcheck disable=SC2086
   module load ${JPW_MODULES}
 fi
 
-echo "Creating venv at ${VENV} with $(${PY} --version)"
-"${PY}" -m venv "${VENV}"
-source "${VENV}/bin/activate"
-pip install -U pip wheel
+command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 
-pip install "jax[${JAX_EXTRA}]"
-JAX_VER="$(python -c 'import jax; print(jax.__version__)')"
+rm -rf "${VENV}"
+uv venv --python "${PY}" "${VENV}"
+uv pip install --python "${VENV}/bin/python" -e ".[${JAX_EXTRA},sim,track]"
 
-pip install -e ".[sim,track]"
-
-# Simulator packages may pull a different jax; put the ROCm-matched version back.
-if [ "$(python -c 'import jax; print(jax.__version__)')" != "${JAX_VER}" ]; then
-  echo "Re-pinning jax==${JAX_VER} for ROCm"
-  pip install "jax[${JAX_EXTRA}]==${JAX_VER}"
-fi
-
-python - <<'EOF'
+"${VENV}/bin/python" - <<'PY'
 import jax
 print("jax", jax.__version__, "backend:", jax.default_backend())
 print("devices:", jax.devices())
-EOF
+PY
 echo "Login-node check done (login nodes may have no GPU; the Slurm smoke test is the real check)."
-echo "If W&B is not logged in yet: source ${VENV}/bin/activate && wandb login"
+echo "If W&B is not logged in yet: ${VENV}/bin/wandb login"
