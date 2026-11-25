@@ -65,10 +65,60 @@ def make_env(cfg: EnvCfg):
     # Imported lazily so the dummy preset runs without MuJoCo installed.
     from mujoco_playground import registry, wrapper
 
-    env = registry.load(cfg.name)
-    return wrapper.wrap_for_brax_training(
-        env, episode_length=cfg.episode_length, action_repeat=1
-    )
+    hmap_fn = None
+    if cfg.name == PARKOUR_ENV:
+        from jpw import parkour
+
+        env, elev = parkour.build_env(cfg.terrain_seed, cfg.terrain_difficulty)
+        if cfg.use_heightmap:
+            hmap_fn = parkour.make_heightmap_fn(elev)
+    else:
+        env = registry.load(cfg.name)
+    env = wrapper.wrap_for_brax_training(env, episode_length=cfg.episode_length, action_repeat=1)
+    return PlaygroundAdapter(env, hmap_fn)
+
+
+PARKOUR_ENV = "Go1Parkour"
+
+
+class PlaygroundAdapter:
+    """Adds what the models consume on top of a (brax-wrapped) Playground env:
+
+    info["contact"]     = info["last_contact"] as float32 (per-foot contact after the step)
+    obs["heightmap"]    = hmap_fn(data.qpos), if given
+
+    Extras are stripped before calling the wrapped env so its auto-reset sees the structure it
+    created.
+    """
+
+    def __init__(self, env, hmap_fn=None):
+        self.env, self.hmap_fn = env, hmap_fn
+        self.action_size = env.action_size
+
+    def __getattr__(self, name):  # forward anything else (dt, mj_model, ...)
+        return getattr(self.env, name)
+
+    def _add(self, state):
+        info = dict(state.info)
+        if "last_contact" in info:
+            info["contact"] = info["last_contact"].astype(jnp.float32)
+        obs = state.obs
+        if self.hmap_fn is not None:
+            obs = {**obs, "heightmap": self.hmap_fn(state.data.qpos)}
+        return state.replace(info=info, obs=obs)
+
+    def _strip(self, state):
+        info = {k: v for k, v in state.info.items() if k != "contact"}
+        obs = state.obs
+        if self.hmap_fn is not None:
+            obs = {k: v for k, v in obs.items() if k != "heightmap"}
+        return state.replace(info=info, obs=obs)
+
+    def reset(self, rng):
+        return self._add(self.env.reset(rng))
+
+    def step(self, state, action):
+        return self._add(self.env.step(self._strip(state), action))
 
 
 # --------------------------------------------------------------------------------------

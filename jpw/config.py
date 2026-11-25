@@ -16,6 +16,9 @@ class EnvCfg:
     use_privileged: bool = False
     # Feed the env's heightmap / depth observation (obs["heightmap"], [H, W]) to the models.
     use_heightmap: bool = False
+    # Go1Parkour only: obstacle course seed and difficulty in (0, 1] (step height, gap width).
+    terrain_seed: int = 0
+    terrain_difficulty: float = 1.0
 
 
 @dataclass
@@ -115,6 +118,17 @@ PRESETS: dict[str, list[str]] = {
         "train.iters=60", "train.collect_steps=16", "train.wm_updates=2",
         "train.ac_updates=2", "train.replay_capacity=256", "train.warmup_iters=2",
         "train.log_every=5", "train.ckpt_every=0",
+    ],
+    # Go1 parkour with everything on: heightmap, privileged WM input, contact head, student actor.
+    "parkour_smoke": [
+        "env.name=Go1Parkour", "env.num_envs=256", "env.use_heightmap=true",
+        "env.use_privileged=true", "ac.asymmetric=true",
+        "train.iters=50", "train.replay_capacity=400", "train.warmup_iters=5",
+        "train.log_every=5", "train.ckpt_every=0",
+    ],
+    "parkour": [
+        "env.name=Go1Parkour", "env.num_envs=2048", "env.use_heightmap=true",
+        "env.use_privileged=true", "ac.asymmetric=true",
     ],
     # Small real-simulator run to validate MJX + ROCm + W&B on one GPU.
     "smoke": [
