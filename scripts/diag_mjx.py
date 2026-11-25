@@ -46,12 +46,24 @@ stage("reset ok")
 stage(f"obs: {jax.tree_util.tree_map(lambda a: a.shape, state.obs)}")
 stage(f"info keys: {list(state.info.keys())}")
 
+def nans(tree):
+    leaves = jax.tree_util.tree_leaves(tree)
+    return sum(int(jnp.sum(~jnp.isfinite(x))) for x in leaves if jnp.issubdtype(x.dtype, jnp.floating))
+
+
+stage(f"nan count after reset: obs={nans(state.obs)} reward={nans(state.reward)}")
 stage("jit step")
 step = jax.jit(wenv.step)
-state = step(state, jnp.zeros((n, wenv.action_size)))
-jax.block_until_ready(state)
-stage(f"step ok, reward mean {float(jnp.mean(state.reward))}")
-for _ in range(20):
-    state = step(state, jnp.zeros((n, wenv.action_size)))
-jax.block_until_ready(state)
-stage("20 more steps ok")
+key = jax.random.PRNGKey(1)
+for mode in ("zeros", "random"):
+    s = state
+    for i in range(30):
+        key, k = jax.random.split(key)
+        a = (jnp.zeros((n, wenv.action_size)) if mode == "zeros"
+             else jax.random.uniform(k, (n, wenv.action_size), minval=-1.0, maxval=1.0))
+        s = step(s, a)
+        jax.block_until_ready(s)
+        if i in (0, 1, 2, 9, 29):
+            stage(f"{mode} step {i}: nan obs={nans(s.obs)} reward={nans(s.reward)} "
+                  f"data.qpos={nans(s.data.qpos)} reward_mean={float(jnp.nanmean(s.reward)):.4f}")
+stage("done")
