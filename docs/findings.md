@@ -1,9 +1,9 @@
 # Findings from the exploration phase
 
-Everything learned before the large parkour run. Written at the end of the 6-hour autonomous exploration
-window. Numbers come from short runs on one MI300X unless stated; most comparisons are 1-2 seeds, and single
-evals are noisy (the same checkpoint varied by 10-45% in episode length), so read them as strong hints, not
-proof. No large run has been launched with the new recipe.
+Everything learned before the large parkour run, from two autonomous exploration windows. Numbers come from
+short runs on one MI300X unless stated; flat-terrain comparisons are 1-2 seeds and the parkour goal-task results are
+a single seed, and single evals are noisy (the same checkpoint varied by 10-45% in episode length), so read them as
+strong hints, not proof. No large run has been launched.
 
 ## TL;DR
 
@@ -17,10 +17,15 @@ proof. No large run has been launched with the new recipe.
 3. **Not solved:** the gait. Velocity tracking never improves (about 24% of its maximum) and the penalties grow;
    the model-gap diagnostic shows the imagined penalties are 3-8x too small, so the actor drifts to jerky,
    energetic motion.
-4. **Parkour is not validated.** All of the above was tested on flat terrain. The grounded goal-reaching agent
-   (TGI-ANYmal style) is only partly built (see "Status and what is left").
-5. **Speed:** an iteration costs about 2.2 s at 2048 envs (collection about 1.25 s, update about 1 s). XLA Triton GEMM
-   must be off on this ROCm stack (it produces NaNs) and that costs nothing. 2-GPU data parallel works.
+4. **The terrain-grounded goal-reaching agent (TGI-ANYmal style) works on our parkour course.** Single seed, 1 GPU,
+   46 minutes of training (4000 iterations, 8.2M env steps): **80% goal success** (within 0.5 m of a goal 2.5-3.5 m
+   ahead at the 8 s limit; 99% on flat goals, 69-76% across obstacles), and **82-97% on three held-out courses** it never
+   trained on. 78% was reached after about 2000 iterations (about 23 minutes). See finding 11 and 12.
+5. **Speed:** about 0.69 s per iteration at 1024 envs on one GPU; two GPUs with twice the envs and batch cost the same
+   per iteration (tested, replicas in sync), so a 20k-iteration run is about 3.8 h. XLA Triton GEMM must be off on this
+   ROCm stack (it produces NaNs) and that costs nothing.
+6. **Still missing for the full plan:** a deployable actor (proprioception + depth, no privileged heightmap / state),
+   a success-guided curriculum, harder / more varied terrain (stepping stones, higher stairs), multiple seeds.
 
 ## What was built (code map)
 
@@ -160,43 +165,75 @@ bonus, termination penalty -500/s); goal-task eval (success = within 0.5 m at th
   Training episode return rose from 11 to about 140-160 (the goal-proximity reward). About 80% of eval episodes reach the
   time limit; the rest end early (fall, pit, lane).
 
+### 12. Held-out courses, speed versus the reference work
+`slurm/eval_heldout.sbatch` on the g3 final checkpoint (other terrain seeds = other random obstacle sequences from the
+same generator and difficulty ramp):
+
+| course | goal success | flat goals | obstacle goals | final distance |
+|---|---|---|---|---|
+| training course (seed 0) | 78% | 96% | 66% | 0.31 m |
+| held-out seed 1 | 97% | 99% | 95% | 0.15 m |
+| held-out seed 2 | 85% | 98% | 77% | 0.26 m |
+| held-out seed 3 | 82% | 98% | 72% | 0.34 m |
+
+It does at least as well on unseen courses as on the training one (which happens to be among the harder layouts), so it is
+reading the terrain, not memorising a layout. It has not been tested on obstacle types or sizes outside the generator.
+
+Two-GPU smoke (200 iterations, 2048 envs, wm.batch 1024 / ac.batch 2048, domain randomisation + heightmap noise on):
+runs, finite, replicas bit-identical, about 5.9k env steps/s, i.e. 0.69 s per iteration (same as one GPU at 1024 envs).
+
+How this compares with the reference work (not a like-for-like comparison):
+- TGI-ANYmal: 30k iterations at 4096 envs, 5.6 h, to its final policy on a much harder multi-terrain suite (stepping
+  stones, pits, boxes, stairs) with a success-guided curriculum that aims for 80% success. We reach 80% success in about
+  0.4-0.8 h on one GPU, but on a single corridor of stairs / boxes / gaps with forward goals only.
+- SuperMimic: 1.2 h on one H100 to a tracking return of 0.82 on LAFAN1; BlinkMimic 3.4 min on 40 clips. Different task and
+  metric.
+- Our iteration rate (1.45 it/s) is about TGI's (1.5 it/s: 40k iterations in 7.5 h); the difference is how many iterations
+  each needs, and TGI's tasks are harder.
+Caveats: single seed; evaluation uses the exact heightmap and exact physical state (privileged, simulation only); no
+deployable (proprioception + depth) actor; the obstacle success is not monotonic across checkpoints (64% / 76% / 69%);
+about 20% of evaluation episodes end early (fall, pit, lane).
+
 ## Status and what is left
 
-**Done and tested** (CPU tests + short GPU runs): everything in the code map. The goal-reaching *environment*
-(`env.goal_task=true`, `env.episode_length=400`) is built and tested on Go1 CPU: spawn on flat patches, goal 2.5-3.5 m
-ahead, goal features (5) appended to the observation (obs_dim 176), the AME2 reward on the exact state, goal-driven
-termination, timer reset on auto-reset (each env keeps one spawn and goal, because Playground's auto-reset restores
-the first state).
+**Done and tested:** everything in the code map, including the grounded goal agent (terrain-conditioned dynamics, actor /
+critic with goal + heightmap features at the integrated pose, pose-carrying imagination, AME2 reward, goal-task eval with
+flat / obstacle split), the graded course + flat-goal mixture, held-out evaluation, and two-GPU training with domain
+randomisation (smoke). 24 unit / integration tests (CPU) plus short GPU runs.
 
-**Not built** (the grounded agent; about 2-3 h of work plus tests):
-1. World-model dynamics step conditioned on terrain features (heightmap at the pose), trained from the replay
-   heightmap.
-2. Actor and critic inputs = latent + goal features + heightmap scan, computed analytically at the (integrated)
-   pose in imagination, and from the true pose in the simulator.
-3. Imagination loop that carries the pose (`goal_task.pose_step` from decoded velocity / gravity / gyro) and scores
-   decoded states with `GoalReward`; `aux0` passed to `ac_update`.
-4. Goal-task evaluation (success = timeout with final distance < 0.5 m), terrain tiling + success-guided curriculum
-   (currently one fixed course).
-5. Optional: force head for the foot-impact term, leap event, Muon, the touchdown gradient cut.
+**Not done:**
+1. **Deployable actor.** The grounded actor sees the exact heightmap and the privileged latent. The plan's deployable actor
+   (proprioception + depth only) is not integrated with the grounded agent (`ac.grounded` requires `ac.asymmetric=false`).
+2. **Success-guided curriculum.** The mixture is fixed (each env keeps one spawn because Playground's auto-reset restores
+   the first state); TGI adapts terrain difficulty from success rates.
+3. **Harder terrain** (stepping stones, bigger stairs, wider gaps) and held-out obstacle *types*.
+4. **Seeds.** Every parkour result is one seed.
+5. Optional: foot-impact force head, leap event, Muon, touchdown gradient cut, larger world-model batches (TGI: 2048 windows).
 
 ## Recommendation for the long run
 
-Honest state: there is no recipe validated on parkour yet. Options:
+Use the recipe that produced g3 (+ g4, see below), at the scale that was smoke-tested:
 
-- **A. Validate on the existing parkour env first (about 15 minutes).** `slurm/train.sbatch` with the flat recipe
-  (unclipped reward, alive 0.05, fixed noise 0.1, stabilisers, easier terrain `env.terrain_difficulty=0.5`) was
-  ran as `exp-pk-val` (jobs 6435 / 6436): it survives but does not progress (finding 10), so the alive-bonus-based
-  recipe is NOT ready for a long parkour run. The goal-reaching reward uses a termination penalty instead of a bonus.
-- **B. Finish the grounded goal agent (steps 1-4 above), then run.** This is the TGI-style route and the one most
-  likely to learn obstacle crossing, but it is not built.
-- **Suggested first long run settings once a recipe is chosen** (2 GPUs, `--gres=gpu:2`): `env.num_envs=4096`,
-  `wm.batch=1024 ac.batch=2048`, `train.collect_steps=2`, `train.wm_updates=8 train.ac_updates=8`,
-  `train.lr_decay_iters` = total iterations, `ac.ema=0.995`, `ac.fixed_std=0.1 ac.ent_coef=0`, W&B group named for the
-  run. Time one 100-iteration job first; flat Go1 ran at about 0.55 s per iteration at 1024 envs on one GPU, so
-  20k iterations is roughly 3-5 hours but the parkour figure is unmeasured.
+```bash
+sbatch --gres=gpu:2 --cpus-per-task=32 --mem=256G slurm/train.sbatch --preset goal --run-name goal-long --set \
+  train.num_devices=2 env.num_envs=2048 wm.batch=1024 ac.batch=2048 \
+  train.iters=20000 train.lr_decay_iters=20000 train.ckpt_every=2000 train.log_every=50 \
+  env.course_ramp=true env.flat_goal_frac=0.3 env.domain_randomization=true env.hmap_noise=0.01 \
+  train.wandb_group=goal-long
+# afterwards, per checkpoint:  sbatch slurm/eval_heldout.sbatch runs/goal-long/ckpt_<N>.pkl 1 2 3 4
+```
+Estimated 3.8 h (0.69 s per iteration). The `goal` preset already sets: grounded actor, decoder heads, fixed action noise 0.1
+with no entropy bonus, EMA actor 0.995, element-wise gradient clip 0.1, Adam beta2 0.95, 2 collection steps and 8 + 8
+updates per iteration. Things you may want to decide differently:
+- A longer horizon is only worthwhile if success keeps rising: g3 plateaued around 78-83% from 2000 iterations at 1024
+  envs, so the long run is mostly about harder terrain and robustness, not about reaching 80% faster.
+- If you want a harder test, raise `env.terrain_difficulty` (the ramp's maximum, 1.0 now) is already at its cap; the next
+  lever is new obstacle types (needs code).
+- The 24-test suite and `docs/findings.md` are the reference for what is verified.
 
 ## Open questions for you
-1. Is path B (finish the grounded goal agent, about 2-3 h) the plan, with the validation run only as a sanity check?
-2. Success definition for parkour: goal reached within 0.5 m at the end of the 8 s episode (TGI) vs distance along
-   the corridor (our old metric)?
-3. One fixed course vs a tiled terrain curriculum (needs engineering) for the long run?
+1. Is the corridor-with-goals setting (one terrain family, forward goals) the right target for the first long run, or should
+   it include stepping stones / pits first?
+2. Do you want the deployable (proprioception + depth) actor integrated before the long run, or after we see the
+   privileged-agent long run?
+3. Is 0.5 m at the 8 s limit the success definition you want (TGI uses it for its curriculum)?
