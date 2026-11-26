@@ -44,6 +44,10 @@ class WMCfg:
     contact_pos_weight: float = 1.0    # upweight "in contact" flags in the BCE
     contact_event_weight: float = 4.0  # extra weight on touchdown / liftoff transitions
     student_coef: float = 1.0      # deployable-encoder distillation (only if ac.asymmetric)
+    # Decoder head from the latent to the exact physical state (Go1, env.use_privileged=true); trained
+    # on the encoded states and on the open-loop predicted latents (jpw.go1_state).
+    decode_state: bool = False
+    phys_coef: float = 1.0
     lr: float = 3e-4
     batch: int = 512
     grad_clip: float = 1.0
@@ -66,6 +70,9 @@ class ACCfg:
     max_std: float = 1.0
     # > 0: constant action noise std instead of a learned one (SuperMimic uses 0.1). Set ent_coef=0 with it.
     fixed_std: float = 0.0
+    # Imagined reward and termination computed by formula from the decoded physical state (the Go1
+    # Playground terms, unclipped) instead of the learned reward / continue heads. Needs wm.decode_state.
+    analytic_reward: bool = False
     grad_clip: float = 1.0
     # Deployable actor: acts on a student encoder of proprioception (+ heightmap) only, trained to
     # regress the privileged world-model latent. Imagination still uses the privileged latent.

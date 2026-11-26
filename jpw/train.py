@@ -71,6 +71,10 @@ def main(argv=None):
     print(f"env={cfg.env.name} num_envs={n} spec={spec}", flush=True)
 
     agent = Agent(cfg, spec)
+    if cfg.ac.analytic_reward:
+        from jpw.go1_state import Go1Task
+
+        agent.task = Go1Task.from_env(env, cfg.env.alive_bonus)
     ts = agent.init(k_agent)
     start_it, env_steps = 0, 0
     if t.resume:

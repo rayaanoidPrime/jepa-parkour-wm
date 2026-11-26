@@ -10,6 +10,7 @@ from flax import struct
 
 from jpw import replay
 from jpw.config import Config
+from jpw import go1_state
 from jpw.models import Actor, Critic, WorldModel, sample_tanh, symlog
 from jpw.spec import Spec
 
@@ -68,7 +69,14 @@ class Agent:
             w.latent_dim, w.hidden, w.depth, obs_dim=spec.obs_dim, prop_dim=spec.prop_dim,
             use_hmap=spec.hmap_shape is not None, cnn_channels=w.cnn_channels,
             contact_dim=spec.contact_dim, asymmetric=a.asymmetric,
+            phys_dim=go1_state.PHYS_DIM if w.decode_state else 0,
         )
+        if w.decode_state:
+            go1_state.check_layout(spec.obs_dim, spec.aux_dim)
+            self._sd, self._nom = jnp.asarray(go1_state.SD), jnp.asarray(go1_state.NOM)
+        if a.analytic_reward and not w.decode_state:
+            raise ValueError("ac.analytic_reward needs wm.decode_state=true")
+        self.task = None  # go1_state.Go1Task, set by the trainer when ac.analytic_reward
         self.actor = Actor(spec.act_dim, a.hidden, a.depth, a.min_std, a.max_std, a.fixed_std)
         self.critic = Critic(a.hidden, a.depth)
         self.wm_tx = optax.chain(optax.clip_by_global_norm(w.grad_clip), optax.adam(w.lr))
@@ -104,6 +112,10 @@ class Agent:
     # -------------------------------------------------------- model helpers
     def encode(self, wm_params, obs, hmap=None):
         return self.wm.apply(wm_params, obs, hmap, method=WorldModel.encode)
+
+    def decode_phys(self, wm_params, z):
+        """Latent -> exact physical state in raw units (see go1_state.GROUPS)."""
+        return self.wm.apply(wm_params, z, method=WorldModel.decode) * self._sd
 
     def policy_latent(self, wm_params, obs, hmap=None):
         """Latent the *deployed* actor acts on: the student (proprio + heightmap only) if
@@ -177,6 +189,20 @@ class Agent:
             extra["wm/contact_acc"] = jnp.sum(m * hit) / denom
             extra["wm/contact_event_acc"] = jnp.sum(m * event * hit) / jnp.maximum(jnp.sum(m * event), 1.0)
             loss = loss + c.contact_coef * contact_l
+        if self.wm.phys_dim:
+            tgt = go1_state.phys_targets(obs, batch["aux"])                      # [B, K+1, P]
+            e_enc = jnp.clip((self.decode_phys(wm_params, z_all) - tgt) / self._nom, -10.0, 10.0)
+            e_pred = jnp.clip((self.decode_phys(wm_params, z_pred) - tgt[:, 1:]) / self._nom, -10.0, 10.0)
+            l_enc = jnp.mean(e_enc**2)
+            l_pred = jnp.sum(alive[..., None] * e_pred**2) / (jnp.maximum(alive.sum(), 1.0) * e_pred.shape[-1])
+            phys_l = l_enc + l_pred
+            extra["wm/phys"] = phys_l
+            m_last = alive[:, -1]
+            for i, name in enumerate(go1_state.NAMES):  # rollout error at step K, in nominal-error units
+                sl = e_pred[:, -1, go1_state.OFFS[i]:go1_state.OFFS[i + 1]]
+                extra[f"wm/phys_{name}"] = jnp.sqrt(jnp.sum(m_last[:, None] * sl**2) /
+                                                    (jnp.maximum(m_last.sum(), 1.0) * sl.shape[-1]))
+            loss = loss + c.phys_coef * phys_l
         if self.asymmetric:
             z_s = self.wm.apply(wm_params, obs, hmap, method=WorldModel.student)
             student_l = jnp.mean((z_s - sg(z_all)) ** 2)
@@ -205,26 +231,38 @@ class Agent:
     def ac_update(self, ts: TrainState, obs0, key, hmap0=None) -> tuple[TrainState, dict]:
         c = self.cfg.ac
         z0 = sg(self.encode(ts.wm, obs0, hmap0))
+        analytic = c.analytic_reward
+        if analytic:
+            if self.task is None:
+                raise ValueError("ac.analytic_reward: set agent.task = go1_state.Go1Task.from_env(env) first")
+            cmd0 = obs0[..., go1_state.CMD]            # held fixed over the imagined rollout
+            a0 = obs0[..., go1_state.LAST_ACT]         # previous action at the start state
 
         def actor_loss(actor_params):
             keys = jax.random.split(key, c.horizon)
 
-            def body(z, k):
+            def body(carry, k):
+                z, a_prev = carry
                 mean, std = self.actor.apply(actor_params, z)
                 a, logp = sample_tanh(mean, std, k)
-                r = self.wm.apply(ts.wm, z, a, method=WorldModel.reward)
-                cont = jax.nn.sigmoid(self.wm.apply(ts.wm, z, a, method=WorldModel.cont_logit))
                 z_next = self.wm.apply(ts.wm, z, a, method=WorldModel.step)
                 if self.spec.contact_dim:
-                    p_ct = jnp.mean(jax.nn.sigmoid(
-                        self.wm.apply(ts.wm, z, a, method=WorldModel.contact_logit)))
+                    c_prob = jax.nn.sigmoid(self.wm.apply(ts.wm, z, a, method=WorldModel.contact_logit))
+                    p_ct = jnp.mean(c_prob)
                 else:
-                    p_ct = jnp.zeros(())
-                return z_next, (z, r, cont, logp, p_ct)
+                    c_prob, p_ct = jnp.zeros((z.shape[0], 4)), jnp.zeros(())
+                if analytic:  # reward / termination by formula from the decoded exact state
+                    r, d = self.task.reward(self.decode_phys(ts.wm, z_next), a, a_prev, cmd0, c_prob)
+                    cont = 1.0 - d
+                else:
+                    r = self.wm.apply(ts.wm, z, a, method=WorldModel.reward)
+                    cont = jax.nn.sigmoid(self.wm.apply(ts.wm, z, a, method=WorldModel.cont_logit))
+                return (z_next, a), (z, r, cont, logp, p_ct)
 
             # Gradients flow from returns back through the frozen world model into the actions
             # (analytic policy gradients, as in Dreamer / SHAC / SuperMimic).
-            z_last, (zs, rs, cs, logps, p_cts) = jax.lax.scan(body, z0, keys)
+            a_init = a0 if analytic else jnp.zeros((z0.shape[0], self.spec.act_dim))
+            (z_last, _), (zs, rs, cs, logps, p_cts) = jax.lax.scan(body, (z0, a_init), keys)
             z_all = jnp.concatenate([zs, z_last[None]], 0)
             values = self.critic.apply(ts.critic_target, z_all)
             rets = lambda_returns(rs, cs, values, c.gamma, c.lam)  # [H, B]

@@ -43,7 +43,8 @@ class Tracker:
         metrics = {k: float(v) for k, v in metrics.items()}
         metrics["perf/wall_min"] = (time.time() - self._t0) / 60.0
         keys = ("env/reward_per_step", "env/ep_return", "wm/jepa", "wm/latent_std", "wm/reward",
-                "wm/contact_acc", "wm/contact_event_acc", "wm/student", "ac/imag_return",
+                "wm/contact_acc", "wm/contact_event_acc", "wm/student", "wm/phys", "wm/phys_linvel",
+                "wm/phys_gravity", "wm/phys_jvel", "ac/imag_return",
                 "perf/env_sps")
         brief = "  ".join(f"{k.split('/')[-1]}={metrics[k]:.4g}" for k in keys if k in metrics)
         print(f"[step {step}] {brief}", flush=True)

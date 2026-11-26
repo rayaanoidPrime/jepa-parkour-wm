@@ -70,6 +70,7 @@ class ObsEncoder(nn.Module):
 class WorldModel(nn.Module):
     """Decoder-free JEPA world model.
 
+    decode:   z_t -> physical state           (optional head; exact state for analytic reward / termination)
     encode:   (o_t, h_t) -> z_t               (trained against an EMA target encoder)
     step:     (z_t, a_t) -> z_{t+1}           (residual, layer-normed latent dynamics)
     reward:   (z_t, a_t) -> r_t               (predicted in symlog space)
@@ -90,6 +91,7 @@ class WorldModel(nn.Module):
     cnn_channels: int = 32
     contact_dim: int = 0
     asymmetric: bool = False
+    phys_dim: int = 0          # > 0: decoder head from the latent to the exact physical state
 
     def setup(self):
         self.encoder = ObsEncoder(self.hidden, self.depth, self.latent_dim, self.use_hmap, self.cnn_channels)
@@ -102,6 +104,8 @@ class WorldModel(nn.Module):
         self.cont_head = MLP(self.hidden, 2, 1)
         if self.contact_dim:
             self.contact_head = MLP(self.hidden, 2, self.contact_dim)
+        if self.phys_dim:
+            self.phys_head = MLP(self.hidden, 2, self.phys_dim)
 
     def encode(self, obs, hmap=None):
         return self.encoder(obs, hmap)
@@ -124,8 +128,14 @@ class WorldModel(nn.Module):
     def contact_logit(self, z, a):
         return self.contact_head(jnp.concatenate([z, a], -1))
 
+    def decode(self, z):
+        """Latent -> physical state, in units of go1_state.SD (multiply by SD for raw units)."""
+        return self.phys_head(z)
+
     def __call__(self, obs, a, hmap=None):  # only used to initialise every submodule
         z = self.encode(obs, hmap)
+        if self.phys_dim:
+            self.decode(z)
         if self.asymmetric:
             self.student(obs, hmap)
         if self.contact_dim:

@@ -210,3 +210,20 @@ def test_analytic_go1_reward_matches_playground_terms():
         assert worst[k2] < 2e-3, (k2, worst[k2])
     # approximations (body-frame gravity / velocity instead of the world-frame torso axis / velocity)
     assert worst["orientation"] < 0.5 and worst["lin_vel_z"] < 0.5, worst
+
+
+@requires_sim
+def test_decoder_heads_and_analytic_reward_train_on_go1(tmp_path, capfd):
+    from jpw import train
+
+    ts = train.main(["--run-name", "r", "--set", "env.name=Go1JoystickFlatTerrain", "env.num_envs=8",
+                     "env.use_privileged=true", "env.unclipped_reward=true", "env.alive_bonus=0.05",
+                     "wm.decode_state=true", "ac.analytic_reward=true", "ac.fixed_std=0.1", "ac.ent_coef=0.0",
+                     "wm.latent_dim=32", "wm.hidden=64", "ac.hidden=64", "wm.batch=8", "ac.batch=8",
+                     "wm.pred_horizon=3", "ac.horizon=4", "train.iters=6", "train.warmup_iters=1",
+                     "train.collect_steps=4", "train.replay_capacity=24", "train.log_every=2",
+                     "train.wandb_mode=disabled", f"train.out_dir={tmp_path}", "train.ckpt_every=3"])
+    out = capfd.readouterr().out
+    assert "wm/phys" in out or "phys=" in out
+    assert all(bool(jnp.all(jnp.isfinite(x))) for x in jax.tree_util.tree_leaves(ts.wm))
+    assert all(bool(jnp.all(jnp.isfinite(x))) for x in jax.tree_util.tree_leaves(ts.actor))
