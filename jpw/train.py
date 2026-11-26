@@ -22,6 +22,7 @@ import time
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from jpw import checkpoint, replay
 from jpw.agent import Agent
@@ -71,7 +72,13 @@ def main(argv=None):
     print(f"env={cfg.env.name} num_envs={n} spec={spec}", flush=True)
 
     agent = Agent(cfg, spec)
-    if cfg.ac.analytic_reward:
+    if cfg.ac.grounded:
+        from jpw import parkour
+
+        base_env = env.unwrapped
+        agent.task = base_env._goal_reward
+        agent.hm_fn = parkour.make_heightmap_pose_fn(np.asarray(base_env._elev_j))
+    elif cfg.ac.analytic_reward:
         from jpw.go1_state import Go1Task
 
         agent.task = Go1Task.from_env(env, cfg.env.alive_bonus)

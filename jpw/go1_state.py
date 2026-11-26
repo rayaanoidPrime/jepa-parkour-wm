@@ -21,6 +21,7 @@ import numpy as np
 OBS_DIM = 171          # state 48 + privileged 123
 GOAL_OBS_DIM = OBS_DIM + 5  # + goal features (jpw.goal_task) appended by the adapter in the goal task
 # --- slices of the observation vector
+GOAL = slice(OBS_DIM, GOAL_OBS_DIM)  # goal features (goal task), appended after the Playground observation
 LAST_ACT = slice(33, 45)
 CMD = slice(45, 48)
 _GYRO, _GRAV, _LINVEL, _ANGVEL = slice(96, 99), slice(102, 105), slice(105, 108), slice(108, 111)

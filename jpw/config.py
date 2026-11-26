@@ -83,6 +83,10 @@ class ACCfg:
     # Imagined reward and termination computed by formula from the decoded physical state (the Go1
     # Playground terms, unclipped) instead of the learned reward / continue heads. Needs wm.decode_state.
     analytic_reward: bool = False
+    # Terrain-grounded imagination (TGI-ANYmal style, Go1Parkour with env.goal_task): the world-model dynamics are
+    # conditioned on the heightmap at the pose, the actor / critic see [latent, goal features, heightmap] computed
+    # at the integrated pose, and imagined states are scored by the AME2 goal reward. Needs wm.decode_state.
+    grounded: bool = False
     grad_clip: float = 1.0
     # Deployable actor: acts on a student encoder of proprioception (+ heightmap) only, trained to
     # regress the privileged world-model latent. Imagination still uses the privileged latent.
@@ -172,6 +176,20 @@ PRESETS: dict[str, list[str]] = {
         "env.name=Go1Parkour", "env.use_heightmap=true", "env.use_privileged=true",
         "ac.asymmetric=true", "env.domain_randomization=true", "env.hmap_noise=0.01",
         "train.num_devices=0", "env.num_envs=8192", "wm.batch=2048", "ac.batch=4096",
+    ],
+    # Terrain-grounded goal-reaching on Go1 parkour (single GPU; scale env.num_envs / batches with GPUs).
+    "goal": [
+        "env.name=Go1Parkour", "env.goal_task=true", "env.episode_length=400", "env.use_heightmap=true",
+        "env.use_privileged=true", "env.num_envs=1024", "wm.decode_state=true", "ac.grounded=true",
+        "ac.fixed_std=0.1", "ac.ent_coef=0.0", "ac.ema=0.995", "ac.grad_clip_value=0.1", "ac.beta2=0.95",
+        "train.collect_steps=2", "train.warmup_iters=64", "train.wm_updates=8", "train.ac_updates=8",
+    ],
+    "goal_smoke": [
+        "env.name=Go1Parkour", "env.goal_task=true", "env.episode_length=400", "env.use_heightmap=true",
+        "env.use_privileged=true", "env.num_envs=256", "wm.decode_state=true", "ac.grounded=true",
+        "ac.fixed_std=0.1", "ac.ent_coef=0.0", "ac.ema=0.995",
+        "train.collect_steps=2", "train.warmup_iters=20", "train.iters=60", "train.log_every=5",
+        "train.ckpt_every=30", "train.replay_capacity=200",
     ],
     # Small real-simulator run to validate MJX + ROCm + W&B on one GPU.
     "smoke": [

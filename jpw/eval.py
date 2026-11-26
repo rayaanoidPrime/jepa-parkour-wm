@@ -33,7 +33,8 @@ def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0) -> dict:
     got = get_spec(state, cfg.env, env.action_size)
     if got != spec:
         raise ValueError(f"checkpoint was made for {spec}, but this env produces {got}")
-    parkour = cfg.env.name == PARKOUR_ENV
+    goal = cfg.env.goal_task
+    parkour = cfg.env.name == PARKOUR_ENV and not goal
     if parkour:
         from jpw.parkour import FINISH_X
 
@@ -49,15 +50,23 @@ def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0) -> dict:
         length = length + 1
         x = nxt.data.qpos[:, 0] if parkour else jnp.zeros(n)
         xmax = jnp.maximum(xmax, x)
+        if goal:  # final distance to the goal at episode end; success = reached (< 0.5 m) at the time limit
+            gd, trunc = nxt.info["goal_dist"], nxt.info["truncation"] > 0
+            prog = jnp.sum(jnp.where(done, gd, 0.0))
+            succ = jnp.sum(done & trunc & (gd < 0.5))
+            n_trunc = jnp.sum(done & trunc)
+        else:
+            prog = jnp.sum(jnp.where(done, xmax, 0.0))
+            succ = jnp.sum(done & (xmax >= (FINISH_X - 0.1 if parkour else jnp.inf)))
+            n_trunc = jnp.zeros(())
         out = (jnp.sum(jnp.where(done, ret, 0.0)), jnp.sum(jnp.where(done, length, 0)),
-               jnp.sum(done), jnp.sum(jnp.where(done, xmax, 0.0)),
-               jnp.sum(done & (xmax >= (FINISH_X - 0.1 if parkour else jnp.inf))))
+               jnp.sum(done), prog, succ, n_trunc)
         terms = {k: jnp.sum(v) for k, v in getattr(nxt, "metrics", {}).items() if k.startswith("reward/")}
         return (nxt, jnp.where(done, 0.0, ret), jnp.where(done, 0, length),
                 jnp.where(done, x, xmax)), out, terms
 
     carry = (state, jnp.zeros(n), jnp.zeros(n, jnp.int32), jnp.zeros(n))
-    tot = np.zeros(5)
+    tot = np.zeros(6)
     term_tot: dict[str, float] = {}
     steps_done = 0
     max_steps = cfg.env.episode_length * (-(-episodes // n) + 1)
@@ -69,10 +78,13 @@ def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0) -> dict:
         steps_done += 1
         if tot[2] >= episodes:
             break
-    ret, length, count, xmax, success = tot
+    ret, length, count, xmax, success, n_trunc = tot
     res = {"episodes": int(count), "return": ret / max(count, 1), "length": length / max(count, 1)}
     if parkour:
         res.update({"progress_m": xmax / max(count, 1), "success_rate": success / max(count, 1)})
+    if goal:
+        res.update({"final_dist_m": xmax / max(count, 1), "goal_success_rate": success / max(count, 1),
+                    "timeout_frac": n_trunc / max(count, 1)})
     dt = float(getattr(env, "dt", 0.02))
     res["terms"] = {k[len("reward/"):]: dt * v / max(steps_done * n, 1) for k, v in term_tot.items()}
     return res

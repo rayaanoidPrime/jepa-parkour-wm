@@ -5,6 +5,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 from flax import struct
 
@@ -71,7 +72,19 @@ class Agent:
             use_hmap=spec.hmap_shape is not None, cnn_channels=w.cnn_channels,
             contact_dim=spec.contact_dim, asymmetric=a.asymmetric,
             phys_dim=go1_state.PHYS_DIM if w.decode_state else 0,
+            tf_dim=int(np.prod(spec.hmap_shape)) if (a.grounded and spec.hmap_shape) else 0,
         )
+        self.grounded = a.grounded
+        self.ext_dim = 0
+        self.hm_fn = None  # (pos, yaw) -> heightmap, set by the trainer when grounded
+        if a.grounded:
+            if not w.decode_state or a.asymmetric:
+                raise ValueError("ac.grounded needs wm.decode_state=true and ac.asymmetric=false")
+            if spec.obs_dim != go1_state.GOAL_OBS_DIM or spec.hmap_shape is None:
+                raise ValueError("ac.grounded needs the goal task (env.goal_task, env.use_heightmap, env.use_privileged)")
+            from jpw import goal_task as _gt
+
+            self.ext_dim = _gt.GOAL_FEAT_DIM + int(np.prod(spec.hmap_shape))
         if w.decode_state:
             go1_state.check_layout(spec.obs_dim, spec.aux_dim)
             self._sd, self._nom = jnp.asarray(go1_state.SD), jnp.asarray(go1_state.NOM)
@@ -102,7 +115,7 @@ class Agent:
         obs = jnp.zeros((1, s.obs_dim))
         act = jnp.zeros((1, s.act_dim))
         hmap = None if s.hmap_shape is None else jnp.zeros((1, *s.hmap_shape))
-        z = jnp.zeros((1, self.cfg.wm.latent_dim))
+        z = jnp.zeros((1, self.cfg.wm.latent_dim + self.ext_dim))
         wm = self.wm.init(k1, obs, act, hmap)
         actor = self.actor.init(k2, z)
         critic = self.critic.init(k3, z)
@@ -137,8 +150,14 @@ class Agent:
             return self.wm.apply(wm_params, obs, hmap, method=WorldModel.student)
         return self.encode(wm_params, obs, hmap)
 
+    def ext_features(self, obs, hmap):
+        """Goal features (in the observation) + flattened heightmap: the grounded actor / critic extras."""
+        return jnp.concatenate([obs[..., go1_state.GOAL], hmap.reshape(*hmap.shape[:-2], -1)], -1)
+
     def act(self, ts: TrainState, obs, key, hmap=None, deterministic=False, ema=False):
         z = self.policy_latent(ts.wm, obs, hmap)
+        if self.grounded:
+            z = jnp.concatenate([z, self.ext_features(obs, hmap)], -1)
         mean, std = self.actor.apply(ts.actor_ema if ema else ts.actor, z)
         if deterministic:
             return jnp.tanh(mean)
@@ -158,8 +177,9 @@ class Agent:
         z0 = z_all[:, 0]
         target = sg(self.encode(target_params, obs[:, 1:], None if hmap is None else hmap[:, 1:]))
 
-        def body(z, a):
-            z_next = self.wm.apply(wm_params, z, a, method=WorldModel.step)
+        def body(z, xs):
+            a, tf = xs
+            z_next = self.wm.apply(wm_params, z, a, tf if self.grounded else None, method=WorldModel.step)
             r = self.wm.apply(wm_params, z, a, method=WorldModel.reward_symlog)
             cl = self.wm.apply(wm_params, z, a, method=WorldModel.cont_logit)
             ct = (self.wm.apply(wm_params, z, a, method=WorldModel.contact_logit)
@@ -167,7 +187,9 @@ class Agent:
             return z_next, (z_next, r, cl, ct)
 
         acts = jnp.swapaxes(act[:, :k], 0, 1)
-        _, (z_pred, r_pred, c_logit, ct_logit) = jax.lax.scan(body, z0, acts)
+        tfs = jnp.swapaxes((hmap[:, :k].reshape(hmap.shape[0], k, -1) if self.grounded
+                            else jnp.zeros((act.shape[0], k, 1))), 0, 1)
+        _, (z_pred, r_pred, c_logit, ct_logit) = jax.lax.scan(body, z0, (acts, tfs))
         z_pred = jnp.swapaxes(z_pred, 0, 1)                                     # [B, K, D]
         r_pred, c_logit = r_pred.T, c_logit.T                                   # [B, K]
 
@@ -241,7 +263,46 @@ class Agent:
         return ts.replace(wm=wm, wm_target=target, wm_opt=opt), m
 
     # ------------------------------------------ actor-critic in imagination
-    def ac_update(self, ts: TrainState, obs0, key, hmap0=None) -> tuple[TrainState, dict]:
+    def _rollout_grounded(self, ts, actor_params, z0, obs0, aux0, keys):
+        """Terrain-grounded imagination: the pose is integrated from decoded velocities, the heightmap and the goal
+        features are recomputed at it each step (actor / critic extras and the dynamics' terrain input), and decoded
+        states are scored by the AME2 goal reward. Returns the same tuple as the plain rollout, with the actor's full
+        input (latent + extras) in place of the latent."""
+        from jpw import goal_task as gt
+
+        gr, hm_fn, dt = self.task, self.hm_fn, self.task.dt
+        s0 = go1_state.split(go1_state.phys_targets(obs0[..., :go1_state.OBS_DIM], aux0))
+        pos0, yaw0 = aux0[..., :3], gt.yaw_from_quat(aux0[..., 3:7])
+        gxy, gyaw, tl0 = gt.goal_from_features(pos0, yaw0, obs0[..., go1_state.GOAL])
+        a0 = obs0[..., go1_state.LAST_ACT]
+        nb = z0.shape[0]
+
+        def ext(pos, yaw, tl):
+            tf = hm_fn(pos, yaw).reshape(nb, -1)
+            return jnp.concatenate([gt.goal_features(pos, yaw, gxy, gyaw, tl), tf], -1), tf
+
+        def body(carry, k):
+            z, a_prev, pos, yaw, g_prev, jp_prev, tl = carry
+            e, tf = ext(pos, yaw, tl)
+            zin = jnp.concatenate([z, e], -1)
+            mean, std = self.actor.apply(actor_params, zin)
+            a, logp = sample_tanh(mean, std, k)
+            z1 = self.wm.apply(ts.wm, z, a, tf, method=WorldModel.step)
+            c_prob = jax.nn.sigmoid(self.wm.apply(ts.wm, z, a, method=WorldModel.contact_logit))
+            p1 = go1_state.split(self.decode_phys(ts.wm, z1))
+            nxt = {"g": p1["gravity"], "jpos": p1["jpos"], "linvel": p1["linvel"], "gyro": p1["gyro"],
+                   "feet_vel": p1["feet_vel"]}
+            pos1, yaw1 = gt.pose_step(pos, yaw, nxt["linvel"], nxt["g"], nxt["gyro"], dt)
+            tl1 = tl - dt
+            r, d, _ = gr.reward({"g": g_prev, "jpos": jp_prev}, nxt, pos1, yaw1, gxy, gyaw, tl1, a, a_prev, c_prob)
+            return (z1, a, pos1, yaw1, nxt["g"], nxt["jpos"], tl1), (zin, r, 1.0 - d, logp, jnp.mean(c_prob))
+
+        carry0 = (z0, a0, pos0, yaw0, s0["gravity"], s0["jpos"], tl0)
+        (z_l, _, pos_l, yaw_l, _, _, tl_l), (zs, rs, cs, logps, p_cts) = jax.lax.scan(body, carry0, keys)
+        zin_last = jnp.concatenate([z_l, ext(pos_l, yaw_l, tl_l)[0]], -1)
+        return zs, zin_last, rs, cs, logps, p_cts
+
+    def ac_update(self, ts: TrainState, obs0, key, hmap0=None, aux0=None) -> tuple[TrainState, dict]:
         c = self.cfg.ac
         z0 = sg(self.encode(ts.wm, obs0, hmap0))
         analytic = c.analytic_reward
@@ -275,7 +336,10 @@ class Agent:
             # Gradients flow from returns back through the frozen world model into the actions
             # (analytic policy gradients, as in Dreamer / SHAC / SuperMimic).
             a_init = a0 if analytic else jnp.zeros((z0.shape[0], self.spec.act_dim))
-            (z_last, _), (zs, rs, cs, logps, p_cts) = jax.lax.scan(body, (z0, a_init), keys)
+            if self.grounded:
+                zs, z_last, rs, cs, logps, p_cts = self._rollout_grounded(ts, actor_params, z0, obs0, aux0, keys)
+            else:
+                (z_last, _), (zs, rs, cs, logps, p_cts) = jax.lax.scan(body, (z0, a_init), keys)
             z_all = jnp.concatenate([zs, z_last[None]], 0)
             values = self.critic.apply(ts.critic_target, z_all)
             rets = lambda_returns(rs, cs, values, c.gamma, c.lam)  # [H, B]
@@ -339,7 +403,8 @@ class Agent:
             k_s, k_i = jax.random.split(k)
             b = replay.sample(rb, k_s, ac_batch, 1)
             hmap0 = b["hmap"][:, 0] if "hmap" in b else None
-            return self.ac_update(ts, b["obs"][:, 0], k_i, hmap0)
+            aux0 = b["aux"][:, 0] if "aux" in b else None
+            return self.ac_update(ts, b["obs"][:, 0], k_i, hmap0, aux0)
 
         ts, wm_m = jax.lax.scan(wm_body, ts, jax.random.split(k_wm, t.wm_updates))
         ts, ac_m = jax.lax.scan(ac_body, ts, jax.random.split(k_ac, t.ac_updates))

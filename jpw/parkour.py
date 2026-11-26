@@ -165,6 +165,22 @@ def make_heightmap_fn(elev: np.ndarray):
     return fn
 
 
+def make_heightmap_pose_fn(elev: np.ndarray):
+    """(pos [..., 3], yaw [...]) -> heightmap [..., 12, 8], same definition as make_heightmap_fn but from an
+    explicit base position and heading (used in imagination, where the pose is integrated)."""
+    e = jnp.asarray(elev, jnp.float32)
+    gx, gy = np.meshgrid(HM_X, HM_Y, indexing="ij")
+    gx, gy = jnp.asarray(gx, jnp.float32), jnp.asarray(gy, jnp.float32)
+
+    def fn(pos, yaw):
+        c, s = jnp.cos(yaw)[..., None, None], jnp.sin(yaw)[..., None, None]
+        wx = pos[..., 0, None, None] + c * gx - s * gy
+        wy = pos[..., 1, None, None] + s * gx + c * gy
+        return ground_height(e, wx, wy) - pos[..., 2, None, None] + NOMINAL_BASE_H
+
+    return fn
+
+
 def spawn_positions(seed: int = 0, difficulty: float = 1.0) -> np.ndarray:
     """x positions on the course that are flat within +-0.8 m (safe places to spawn for the goal task)."""
     prof, xs = make_course(seed, difficulty), grid_x()
@@ -206,6 +222,7 @@ def build_env(seed: int = 0, difficulty: float = 1.0, unclipped_reward: bool = F
             self._mj_model.hfield_data[hf:hf + NROW * NCOL] = ((elev) / ZMAX).reshape(-1)
             self._mjx_model = mjx.put_model(self._mj_model)
             self._post_init()
+            self._elev_j = elev_j
             if goal_task:
                 from jpw.goal_task import GoalReward
 

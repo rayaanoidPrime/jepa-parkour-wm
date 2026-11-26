@@ -92,6 +92,7 @@ class WorldModel(nn.Module):
     contact_dim: int = 0
     asymmetric: bool = False
     phys_dim: int = 0          # > 0: decoder head from the latent to the exact physical state
+    tf_dim: int = 0            # > 0: terrain features (flattened heightmap at the pose) feed the dynamics step
 
     def setup(self):
         self.encoder = ObsEncoder(self.hidden, self.depth, self.latent_dim, self.use_hmap, self.cnn_channels)
@@ -113,8 +114,9 @@ class WorldModel(nn.Module):
     def student(self, obs, hmap=None):
         return self.student_enc(obs[..., : self.prop_dim], hmap)
 
-    def step(self, z, a):
-        return self.dyn_norm(z + self.dynamics(jnp.concatenate([z, a], -1)))
+    def step(self, z, a, tf=None):
+        x = jnp.concatenate([z, a] if (not self.tf_dim or tf is None) else [z, a, tf], -1)
+        return self.dyn_norm(z + self.dynamics(x))
 
     def reward_symlog(self, z, a):
         return self.reward_head(jnp.concatenate([z, a], -1))[..., 0]
@@ -140,7 +142,8 @@ class WorldModel(nn.Module):
             self.student(obs, hmap)
         if self.contact_dim:
             self.contact_logit(z, a)
-        return self.step(z, a), self.reward_symlog(z, a), self.cont_logit(z, a)
+        tf = jnp.zeros(z.shape[:-1] + (self.tf_dim,)) if self.tf_dim else None
+        return self.step(z, a, tf), self.reward_symlog(z, a), self.cont_logit(z, a)
 
 
 class Actor(nn.Module):
