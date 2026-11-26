@@ -7,6 +7,8 @@ The actor acts on the student encoder (proprioception + heightmap only) when the
 trained with ac.asymmetric=true, i.e. exactly what would run on the robot. Evaluation defaults to
 no domain randomisation and no heightmap noise; pass --set to stress it. For Go1Parkour it also
 reports mean forward progress (m) and the fraction of episodes that reach the end of the course.
+For Go1 envs it also prints the mean per-step contribution of every reward term (reward/<term> * dt),
+which shows what the policy is paying for and what it is being penalised for.
 """
 from __future__ import annotations
 
@@ -49,21 +51,29 @@ def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0) -> dict:
         out = (jnp.sum(jnp.where(done, ret, 0.0)), jnp.sum(jnp.where(done, length, 0)),
                jnp.sum(done), jnp.sum(jnp.where(done, xmax, 0.0)),
                jnp.sum(done & (xmax >= (FINISH_X - 0.1 if parkour else jnp.inf))))
+        terms = {k: jnp.sum(v) for k, v in getattr(nxt, "metrics", {}).items() if k.startswith("reward/")}
         return (nxt, jnp.where(done, 0.0, ret), jnp.where(done, 0, length),
-                jnp.where(done, x, xmax)), out
+                jnp.where(done, x, xmax)), out, terms
 
     carry = (state, jnp.zeros(n), jnp.zeros(n, jnp.int32), jnp.zeros(n))
     tot = np.zeros(5)
+    term_tot: dict[str, float] = {}
+    steps_done = 0
     max_steps = cfg.env.episode_length * (-(-episodes // n) + 1)
     for _ in range(max_steps):
-        carry, out = step(*carry)
+        carry, out, terms = step(*carry)
         tot += np.array([float(o) for o in out])
+        for k, v in terms.items():
+            term_tot[k] = term_tot.get(k, 0.0) + float(v)
+        steps_done += 1
         if tot[2] >= episodes:
             break
     ret, length, count, xmax, success = tot
     res = {"episodes": int(count), "return": ret / max(count, 1), "length": length / max(count, 1)}
     if parkour:
         res.update({"progress_m": xmax / max(count, 1), "success_rate": success / max(count, 1)})
+    dt = float(getattr(env, "dt", 0.02))
+    res["terms"] = {k[len("reward/"):]: dt * v / max(steps_done * n, 1) for k, v in term_tot.items()}
     return res
 
 
@@ -84,7 +94,14 @@ def main(argv=None):
     print(f"loaded {args.ckpt} (it={meta['it']}, env_steps={meta['env_steps']}); "
           f"actor={'student (proprio+heightmap)' if cfg.ac.asymmetric else 'full latent'}", flush=True)
     res = evaluate(cfg, agent, ts, spec, args.episodes, args.seed)
+    terms = res.pop("terms", {})
     print("EVAL " + "  ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in res.items()))
+    if terms:
+        print("TERMS (mean per-step reward contribution, sorted by size; their sum is the task reward)")
+        for k in sorted(terms, key=lambda k: -abs(terms[k])):
+            print(f"TERM {k:16s} {terms[k]:+.5f}")
+        print(f"TERM {'TOTAL':16s} {sum(terms.values()):+.5f}")
+    res["terms"] = terms
     return res
 
 
