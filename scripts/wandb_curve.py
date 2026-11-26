@@ -18,16 +18,21 @@ for name in sys.argv[1:]:
     if not runs:
         print(f"{name}: no run found")
         continue
-    h = runs[0].history(keys=["ac/imag_reward", "env/reward_per_step", "wm/phys_linvel", "ac/entropy",
-                              "ac/actor_grad_norm", "perf/iter"], samples=4000, pandas=True)
-    h = h.dropna(subset=["ac/imag_reward", "env/reward_per_step"])
-    it = h["perf/iter"].to_numpy()
-    print(f"\n== {name}: {len(h)} logged points")
+    keys = ["ac/imag_reward", "env/reward_per_step", "wm/phys_linvel", "ac/actor_grad_norm", "perf/iter"]
+    rows = [r for r in runs[0].scan_history(keys=keys, page_size=2000)
+            if all(r.get(k) is not None for k in ("ac/imag_reward", "env/reward_per_step", "perf/iter"))]
+    if not rows:
+        print(f"{name}: no logged points with imagined reward")
+        continue
+    col = lambda k: np.array([r.get(k) if r.get(k) is not None else np.nan for r in rows], float)
+    it = col("perf/iter")
+    print(f"
+== {name}: {len(rows)} logged points")
     print(f"{'iter':>6} {'imag_r/step':>12} {'real_r/step':>12} {'gap':>9} {'phys_linvel':>12} {'actor_gn':>9}")
     for lo in range(0, int(it.max()) + 1, 400):
         m = (it >= lo) & (it < lo + 400)
         if m.sum() == 0:
             continue
-        ir, rr = h["ac/imag_reward"][m].mean(), h["env/reward_per_step"][m].mean()
-        print(f"{lo:>6} {ir:>12.5f} {rr:>12.5f} {ir - rr:>+9.5f} {h['wm/phys_linvel'][m].mean():>12.3f} "
-              f"{h['ac/actor_grad_norm'][m].mean():>9.4f}")
+        ir, rr = np.nanmean(col("ac/imag_reward")[m]), np.nanmean(col("env/reward_per_step")[m])
+        print(f"{lo:>6} {ir:>12.5f} {rr:>12.5f} {ir - rr:>+9.5f} {np.nanmean(col('wm/phys_linvel')[m]):>12.3f} "
+              f"{np.nanmean(col('ac/actor_grad_norm')[m]):>9.4f}")
