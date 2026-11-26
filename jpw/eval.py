@@ -4,7 +4,8 @@
   python -m jpw.eval --ckpt ... --set env.domain_randomization=true env.hmap_noise=0.02
 
 The actor acts on the student encoder (proprioception + heightmap only) when the checkpoint was
-trained with ac.asymmetric=true, i.e. exactly what would run on the robot. Evaluation defaults to
+trained with ac.asymmetric=true, i.e. exactly what would run on the robot. If the run used ac.ema > 0 the
+EMA actor is evaluated (override with --set ac.ema=0 for the raw one). Evaluation defaults to
 no domain randomisation and no heightmap noise; pass --set to stress it. For Go1Parkour it also
 reports mean forward progress (m) and the fraction of episodes that reach the end of the course.
 For Go1 envs it also prints the mean per-step contribution of every reward term (reward/<term> * dt),
@@ -41,7 +42,7 @@ def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0) -> dict:
     @jax.jit
     def step(state, ret, length, xmax):
         a = agent.act(ts, get_obs(state.obs, use_priv), None, get_hmap(state.obs, use_hmap),
-                      deterministic=True)
+                      deterministic=True, ema=cfg.ac.ema > 0)
         nxt = env.step(state, a)
         done = nxt.done > 0
         ret = ret + nxt.reward

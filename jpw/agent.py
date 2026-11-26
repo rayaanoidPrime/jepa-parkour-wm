@@ -22,6 +22,7 @@ class TrainState:
     wm: Any
     wm_target: Any
     actor: Any
+    actor_ema: Any
     critic: Any
     critic_target: Any
     wm_opt: Any
@@ -79,9 +80,20 @@ class Agent:
         self.task = None  # go1_state.Go1Task, set by the trainer when ac.analytic_reward
         self.actor = Actor(spec.act_dim, a.hidden, a.depth, a.min_std, a.max_std, a.fixed_std)
         self.critic = Critic(a.hidden, a.depth)
-        self.wm_tx = optax.chain(optax.clip_by_global_norm(w.grad_clip), optax.adam(w.lr))
-        self.actor_tx = optax.chain(optax.clip_by_global_norm(a.grad_clip), optax.adam(a.actor_lr))
-        self.critic_tx = optax.chain(optax.clip_by_global_norm(a.grad_clip), optax.adam(a.critic_lr))
+        t = cfg.train
+
+        def lr(base, updates_per_iter):  # cosine decay to 0.1x over t.lr_decay_iters iterations
+            if t.lr_decay_iters <= 0:
+                return base
+            return optax.cosine_decay_schedule(base, t.lr_decay_iters * max(updates_per_iter, 1), alpha=0.1)
+
+        actor_clip = [optax.clip_by_global_norm(a.grad_clip)]
+        if a.grad_clip_value > 0:
+            actor_clip.append(optax.clip(a.grad_clip_value))
+        self.wm_tx = optax.chain(optax.clip_by_global_norm(w.grad_clip), optax.adam(lr(w.lr, t.wm_updates)))
+        self.actor_tx = optax.chain(*actor_clip, optax.adam(lr(a.actor_lr, t.ac_updates), b2=a.beta2))
+        self.critic_tx = optax.chain(optax.clip_by_global_norm(a.grad_clip),
+                                     optax.adam(lr(a.critic_lr, t.ac_updates)))
 
     # ------------------------------------------------------------------ init
     def init(self, key: jax.Array) -> TrainState:
@@ -96,7 +108,8 @@ class Agent:
         critic = self.critic.init(k3, z)
         copy = lambda tree: jax.tree_util.tree_map(jnp.copy, tree)  # targets must not alias (donation)
         return TrainState(
-            wm=wm, wm_target=copy(wm), actor=actor, critic=critic, critic_target=copy(critic),
+            wm=wm, wm_target=copy(wm), actor=actor, actor_ema=copy(actor), critic=critic,
+            critic_target=copy(critic),
             wm_opt=self.wm_tx.init(wm), actor_opt=self.actor_tx.init(actor),
             critic_opt=self.critic_tx.init(critic), ret_scale=jnp.ones(()),
         )
@@ -124,9 +137,9 @@ class Agent:
             return self.wm.apply(wm_params, obs, hmap, method=WorldModel.student)
         return self.encode(wm_params, obs, hmap)
 
-    def act(self, ts: TrainState, obs, key, hmap=None, deterministic=False):
+    def act(self, ts: TrainState, obs, key, hmap=None, deterministic=False, ema=False):
         z = self.policy_latent(ts.wm, obs, hmap)
-        mean, std = self.actor.apply(ts.actor, z)
+        mean, std = self.actor.apply(ts.actor_ema if ema else ts.actor, z)
         if deterministic:
             return jnp.tanh(mean)
         a, _ = sample_tanh(mean, std, key)
@@ -304,7 +317,8 @@ class Agent:
             "ac/actor_grad_norm": optax.global_norm(g_a),
         }
         m = self._pmean(m)
-        ts = ts.replace(actor=actor, actor_opt=actor_opt, critic=critic,
+        actor_ema = optax.incremental_update(actor, ts.actor_ema, 1.0 - c.ema) if c.ema > 0 else actor
+        ts = ts.replace(actor=actor, actor_ema=actor_ema, actor_opt=actor_opt, critic=critic,
                         critic_opt=critic_opt, critic_target=critic_target, ret_scale=ret_scale)
         return ts, m
 

@@ -38,5 +38,7 @@ def load(path: str) -> tuple[Config, Spec, Agent, TrainState, dict]:
     spec = Spec.from_dict(blob["spec"])
     agent = Agent(cfg, spec)
     template = agent.init(jax.random.PRNGKey(0))
-    ts = serialization.from_state_dict(template, blob["ts"])
+    state = dict(blob["ts"])
+    state.setdefault("actor_ema", state["actor"])  # checkpoints from before the EMA actor
+    ts = serialization.from_state_dict(template, state)
     return cfg, spec, agent, ts, {"it": blob["it"], "env_steps": blob["env_steps"]}

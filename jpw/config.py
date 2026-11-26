@@ -70,6 +70,12 @@ class ACCfg:
     max_std: float = 1.0
     # > 0: constant action noise std instead of a learned one (SuperMimic uses 0.1). Set ent_coef=0 with it.
     fixed_std: float = 0.0
+    # Stabilisers used by SuperMimic / TGI. ema > 0: the deployed (evaluated) actor is an exponential moving
+    # average of the trained one with this decay (0.995 in the papers); data collection uses the raw actor.
+    # grad_clip_value > 0: element-wise gradient clip after the global-norm clip (0.1 in SuperMimic).
+    ema: float = 0.0
+    grad_clip_value: float = 0.0
+    beta2: float = 0.999           # Adam beta2 of the actor (0.95 in SuperMimic)
     # Imagined reward and termination computed by formula from the decoded physical state (the Go1
     # Playground terms, unclipped) instead of the learned reward / continue heads. Needs wm.decode_state.
     analytic_reward: bool = False
@@ -82,6 +88,9 @@ class ACCfg:
 @dataclass
 class TrainCfg:
     seed: int = 0
+    # Cosine learning-rate decay to 0.1x over this many iterations for the world model, actor and critic
+    # (TGI: 100k). 0 = constant learning rate.
+    lr_decay_iters: int = 0
     # GPUs for data parallelism (see jpw.parallel). 1 = single device, 0 = all visible devices.
     # Batch sizes (wm.batch, ac.batch) and env.num_envs are global and must divide evenly.
     num_devices: int = 1

@@ -142,3 +142,21 @@ def test_fixed_action_std(tmp_path):
     mean, std = agent.actor.apply(ts.actor, jnp.zeros((3, cfg.wm.latent_dim)))
     np.testing.assert_allclose(np.asarray(std), 0.1)
     _run(tmp_path, "dummy", ["ac.fixed_std=0.1", "ac.ent_coef=0.0"])
+
+
+def test_stabilisers_ema_decay_clip(tmp_path):
+    """EMA actor, cosine LR decay, element-wise clip and beta2 run end to end; EMA lags the raw actor."""
+    cfg, env, spec, agent, ts = _setup("dummy", ["ac.ema=0.9", "train.lr_decay_iters=20",
+                                                 "ac.grad_clip_value=0.1", "ac.beta2=0.95"])
+    for a, b in zip(jax.tree_util.tree_leaves(ts.actor), jax.tree_util.tree_leaves(ts.actor_ema)):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    run = _run(tmp_path, "dummy", ["ac.ema=0.9", "train.lr_decay_iters=20", "ac.grad_clip_value=0.1",
+                                   "ac.beta2=0.95", "train.ckpt_every=4"])
+    _, _, agent2, ts2, _ = checkpoint.load(str(run / "ckpt_final.pkl"))
+    diff = max(float(np.max(np.abs(np.asarray(a) - np.asarray(b))))
+               for a, b in zip(jax.tree_util.tree_leaves(ts2.actor), jax.tree_util.tree_leaves(ts2.actor_ema)))
+    assert diff > 0 and np.isfinite(diff)  # the EMA is not just a copy
+    obs = jnp.zeros((2, spec.obs_dim))
+    a_raw = agent2.act(ts2, obs, None, deterministic=True)
+    a_ema = agent2.act(ts2, obs, None, deterministic=True, ema=True)
+    assert a_raw.shape == a_ema.shape == (2, spec.act_dim)
