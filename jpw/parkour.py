@@ -166,7 +166,8 @@ def make_heightmap_fn(elev: np.ndarray):
 
 
 # ---- environment ---------------------------------------------------------------------------
-def build_env(seed: int = 0, difficulty: float = 1.0):
+def build_env(seed: int = 0, difficulty: float = 1.0, unclipped_reward: bool = False,
+              alive_bonus: float = 0.0):
     """Returns (unwrapped Playground env, elevation array)."""
     import mujoco
     from mujoco import mjx
@@ -175,8 +176,13 @@ def build_env(seed: int = 0, difficulty: float = 1.0):
     from mujoco_playground._src.locomotion.go1 import joystick as go1_joystick
 
     elev = make_elevation(seed, difficulty).astype(np.float32)
+    base = go1_joystick.Joystick
+    if unclipped_reward or alive_bonus:
+        from jpw.go1_reward import unclipped
 
-    class ParkourJoystick(go1_joystick.Joystick):
+        base = unclipped(base, alive_bonus)
+
+    class ParkourJoystick(base):
         """Joystick task with forward-only commands, a spawn in the start zone and course logic."""
 
         def __init__(self):

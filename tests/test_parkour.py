@@ -155,3 +155,22 @@ def test_heightmap_noise_is_applied_and_optional():
     noisy = jax.jit(make_env(EnvCfg(**base, hmap_noise=0.02)).reset)(keys).obs["heightmap"]
     diff = np.asarray(noisy - clean)
     assert 0.005 < diff.std() < 0.06, diff.std()
+
+
+@requires_sim
+def test_unclipped_reward_matches_terms_and_alive_bonus():
+    from jpw.config import EnvCfg
+    from jpw.envs import make_env
+
+    def run(**kw):
+        env = make_env(EnvCfg(name="Go1JoystickFlatTerrain", num_envs=16, episode_length=50, **kw))
+        st = jax.jit(env.reset)(jax.random.split(jax.random.PRNGKey(0), 16))
+        a = jax.random.uniform(jax.random.PRNGKey(1), (16, env.action_size), minval=-1.0, maxval=1.0)
+        return jax.jit(env.step)(st, a)
+
+    clipped, raw, bonus = run(), run(unclipped_reward=True), run(unclipped_reward=True, alive_bonus=0.05)
+    terms = sum(v for k, v in raw.metrics.items() if k.startswith("reward/"))
+    np.testing.assert_allclose(np.asarray(raw.reward), 0.02 * np.asarray(terms), rtol=1e-5, atol=1e-7)
+    assert float(clipped.reward.min()) >= 0.0 and float(raw.reward.min()) < 0.0  # the clip removed signal
+    np.testing.assert_allclose(np.asarray(bonus.reward - raw.reward), 0.05 * (1 - np.asarray(raw.done)),
+                               atol=1e-6)

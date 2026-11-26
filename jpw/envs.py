@@ -69,9 +69,19 @@ def make_env(cfg: EnvCfg):
     if cfg.name == PARKOUR_ENV:
         from jpw import parkour
 
-        env, elev = parkour.build_env(cfg.terrain_seed, cfg.terrain_difficulty)
+        env, elev = parkour.build_env(cfg.terrain_seed, cfg.terrain_difficulty,
+                                      cfg.unclipped_reward, cfg.alive_bonus)
         if cfg.use_heightmap:
             hmap_fn = parkour.make_heightmap_fn(elev)
+    elif cfg.unclipped_reward or cfg.alive_bonus:
+        from mujoco_playground._src.locomotion.go1 import joystick as go1_joystick
+
+        from jpw.go1_reward import unclipped
+
+        tasks = {"Go1JoystickFlatTerrain": "flat_terrain", "Go1JoystickRoughTerrain": "rough_terrain"}
+        if cfg.name not in tasks:
+            raise ValueError(f"unclipped_reward / alive_bonus is only implemented for {sorted(tasks)}")
+        env = unclipped(go1_joystick.Joystick, cfg.alive_bonus)(task=tasks[cfg.name])
     else:
         env = registry.load(cfg.name)
     rand_fn = None
