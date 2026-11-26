@@ -165,9 +165,17 @@ def make_heightmap_fn(elev: np.ndarray):
     return fn
 
 
+def spawn_positions(seed: int = 0, difficulty: float = 1.0) -> np.ndarray:
+    """x positions on the course that are flat within +-0.8 m (safe places to spawn for the goal task)."""
+    prof, xs = make_course(seed, difficulty), grid_x()
+    cand = np.arange(-0.5, FINISH_X - 4.0, 0.25)
+    ok = [x for x in cand if np.ptp(prof[(xs >= x - 0.8) & (xs <= x + 0.8)]) < 1e-6]
+    return np.asarray(ok, np.float32)
+
+
 # ---- environment ---------------------------------------------------------------------------
 def build_env(seed: int = 0, difficulty: float = 1.0, unclipped_reward: bool = False,
-              alive_bonus: float = 0.0):
+              alive_bonus: float = 0.0, goal_task: bool = False, goal_rate_weight: float = -0.01):
     """Returns (unwrapped Playground env, elevation array)."""
     import mujoco
     from mujoco import mjx
@@ -176,6 +184,9 @@ def build_env(seed: int = 0, difficulty: float = 1.0, unclipped_reward: bool = F
     from mujoco_playground._src.locomotion.go1 import joystick as go1_joystick
 
     elev = make_elevation(seed, difficulty).astype(np.float32)
+    elev_j = jnp.asarray(elev)
+    spawn_xs = jnp.asarray(spawn_positions(seed, difficulty))
+    ground_fn = lambda x, y: ground_height(elev_j, x, y)  # noqa: E731
     base = go1_joystick.Joystick
     if unclipped_reward or alive_bonus:
         from jpw.go1_reward import unclipped
@@ -195,8 +206,15 @@ def build_env(seed: int = 0, difficulty: float = 1.0, unclipped_reward: bool = F
             self._mj_model.hfield_data[hf:hf + NROW * NCOL] = ((elev) / ZMAX).reshape(-1)
             self._mjx_model = mjx.put_model(self._mj_model)
             self._post_init()
+            if goal_task:
+                from jpw.goal_task import GoalReward
+
+                self._goal_reward = GoalReward.from_env(
+                    self, ground_fn, pit_z=PIT_Z, lane_half=LANE_HALF, weights={"rate": goal_rate_weight})
 
         def sample_command(self, rng, x_k):
+            if goal_task:  # the goal (not a velocity command) drives the policy
+                return jnp.zeros(3)
             vx = jax.random.uniform(rng, (), minval=0.4, maxval=1.0)
             return jnp.array([vx, 0.0, 0.0])
 
@@ -205,6 +223,12 @@ def build_env(seed: int = 0, difficulty: float = 1.0, unclipped_reward: bool = F
             qvel = jnp.zeros(self.mjx_model.nv)
             rng, k1, k2, k3 = jax.random.split(rng, 4)
             qpos = qpos.at[0:2].add(jax.random.uniform(k1, (2,), minval=-0.5, maxval=0.5))
+            if goal_task:  # spawn on a flat patch of the course, goal 2.5-3.5 m ahead
+                rng, k_sp, k_gd = jax.random.split(rng, 3)
+                sx = jax.random.choice(k_sp, spawn_xs)
+                sy = jax.random.uniform(k1, (), minval=-0.5, maxval=0.5)
+                qpos = qpos.at[0].set(sx).at[1].set(sy).at[2].set(0.35 + ground_fn(sx, sy))
+                gx = jnp.minimum(sx + jax.random.uniform(k_gd, (), minval=2.5, maxval=3.5), FINISH_X - 0.3)
             yaw = jax.random.uniform(k2, (), minval=-0.15, maxval=0.15)
             qpos = qpos.at[3:7].set(jnp.array([jnp.cos(yaw / 2), 0.0, 0.0, jnp.sin(yaw / 2)]))
             qvel = qvel.at[0:6].set(jax.random.uniform(k3, (6,), minval=-0.5, maxval=0.5))
@@ -230,12 +254,44 @@ def build_env(seed: int = 0, difficulty: float = 1.0, unclipped_reward: bool = F
                 "pert_dir": jnp.zeros(3),
                 "pert_mag": jnp.zeros(()),
             }
+            if goal_task:
+                info["command"] = jnp.zeros(3)
+                info["goal"] = jnp.stack([gx, qpos[1], jnp.zeros(())])
+                info["goal_dist"] = jnp.abs(gx - qpos[0])
             metrics = {f"reward/{k}": jnp.zeros(()) for k in cfg.reward_config.scales.keys()}
             metrics["swing_peak"] = jnp.zeros(())
             obs = self._get_obs(data, info)
             return mjx_env.State(data, obs, jnp.zeros(()), jnp.zeros(()), metrics, info)
 
+        def _goal_step(self, state, action):
+            """Position-goal step: the AME2 reward on the exact state, goal-driven termination."""
+            from jpw import go1_state as gs
+            from jpw import goal_task as gt
+
+            feet = self._feet_site_id
+            a_prev, goal = state.info["last_act"], state.info["goal"]
+            steps = state.info.get("steps", jnp.zeros(()))
+            phys0 = gs.phys_targets(gs.obs_vector(state.obs), gs.aux_from_data(state.data, feet))
+            out = super().step(state, action)
+            phys1 = gs.phys_targets(gs.obs_vector(out.obs), gs.aux_from_data(out.data, feet))
+            q = out.data.qpos
+            pos, yaw = q[:3], gt.yaw_from_quat(q[3:7])
+            t_left = gt.EPISODE_S - (steps + 1) * self.dt
+            contact = out.info["last_contact"].astype(jnp.float32)
+            r, _, _ = self._goal_reward.reward(
+                gs.reward_inputs(phys0), gs.reward_inputs(phys1), pos, yaw, goal[:2], goal[2], t_left,
+                action, a_prev, contact)
+            g_z = gs.split(phys1)["gravity"][2]
+            hb = pos[2] - ground_fn(pos[0], pos[1])
+            bad = ((-g_z < jnp.cos(self._goal_reward.term_angle)) | (hb < self._goal_reward.term_height)
+                   | (pos[2] < PIT_Z) | (jnp.abs(pos[1]) > LANE_HALF))
+            done = jnp.maximum(out.done, bad.astype(out.done.dtype))
+            out.info["goal_dist"] = jnp.sqrt(jnp.sum((goal[:2] - pos[:2]) ** 2) + 1e-8)
+            return out.replace(reward=r, done=done)
+
         def step(self, state, action):
+            if goal_task:
+                return self._goal_step(state, action)
             x_prev = state.data.qpos[0]
             out = super().step(state, action)
             q = out.data.qpos

@@ -227,3 +227,32 @@ def test_decoder_heads_and_analytic_reward_train_on_go1(tmp_path, capfd):
     assert "wm/phys" in out or "phys=" in out
     assert all(bool(jnp.all(jnp.isfinite(x))) for x in jax.tree_util.tree_leaves(ts.wm))
     assert all(bool(jnp.all(jnp.isfinite(x))) for x in jax.tree_util.tree_leaves(ts.actor))
+
+
+@requires_sim
+def test_goal_task_env_features_reward_and_reset():
+    from jpw import go1_state as gs
+    from jpw import goal_task as gt
+    from jpw.config import EnvCfg
+    from jpw.envs import get_obs, get_spec, make_env
+
+    cfg = EnvCfg(name="Go1Parkour", num_envs=8, episode_length=30, use_heightmap=True, use_privileged=True,
+                 goal_task=True)
+    env = make_env(cfg)
+    st = jax.jit(env.reset)(jax.random.split(jax.random.PRNGKey(0), 8))
+    spec = get_spec(st, cfg, env.action_size)
+    assert spec.obs_dim == gs.GOAL_OBS_DIM and spec.prop_dim == 48 and spec.aux_dim == 19
+    assert get_obs(st.obs, True).shape == (8, gs.GOAL_OBS_DIM)
+    f = st.obs["extra"]
+    assert f.shape == (8, gt.GOAL_FEAT_DIM)
+    assert float(f[:, 0].min()) > 2.2 and float(f[:, 0].max()) < 3.8  # goal 2.5-3.5 m ahead (plus spawn jitter)
+    np.testing.assert_allclose(np.asarray(f[:, 4]), 1.0, atol=1e-6)    # full time left
+    step = jax.jit(env.step)
+    zero = jnp.zeros((8, env.action_size))
+    for k in range(1, 6):
+        st = step(st, zero)
+    assert bool(jnp.all(jnp.isfinite(st.reward))) and "goal_dist" in st.info
+    np.testing.assert_allclose(np.asarray(st.obs["extra"][:, 4]), 1.0 - 5 * 0.02 / gt.EPISODE_S, atol=1e-4)
+    for _ in range(40):  # past the 30-step episode: the timer and goal features restart with the new episode
+        st = step(st, zero)
+    assert float(st.obs["extra"][:, 4].max()) <= 1.0 and float(st.obs["extra"][:, 4].min()) > 0.9

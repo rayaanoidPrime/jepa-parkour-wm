@@ -29,6 +29,8 @@ def get_obs(obs, use_privileged: bool) -> jax.Array:
         x = obs["state"]
         if use_privileged and "privileged_state" in obs:
             x = jnp.concatenate([x, obs["privileged_state"]], axis=-1)
+        if "extra" in obs:  # goal features (goal task)
+            x = jnp.concatenate([x, obs["extra"]], axis=-1)
         return x
     return obs
 
@@ -80,7 +82,7 @@ def make_env(cfg: EnvCfg):
         from jpw import parkour
 
         env, elev = parkour.build_env(cfg.terrain_seed, cfg.terrain_difficulty,
-                                      cfg.unclipped_reward, cfg.alive_bonus)
+                                      cfg.unclipped_reward, cfg.alive_bonus, cfg.goal_task, cfg.goal_rate_weight)
         if cfg.use_heightmap:
             hmap_fn = parkour.make_heightmap_fn(elev)
     elif cfg.unclipped_reward or cfg.alive_bonus:
@@ -126,6 +128,7 @@ class PlaygroundAdapter:
         # Go1: expose base pose + feet world positions as aux physical state
         base = getattr(env, "unwrapped", None)
         self._feet_site = getattr(base, "_feet_site_id", None)
+        self._dt = float(getattr(base, "dt", 0.02))
 
     def __getattr__(self, name):  # forward anything else (dt, mj_model, ...)
         return getattr(self.env, name)
@@ -139,6 +142,14 @@ class PlaygroundAdapter:
             feet = d.site_xpos[:, self._feet_site, :].reshape(d.qpos.shape[0], -1)
             info["aux"] = jnp.concatenate([d.qpos[:, :7], feet], axis=-1)
         obs = state.obs
+        if "goal" in info:  # goal task: goal in the heading frame + time left, from the true pose
+            from jpw import goal_task as gt
+
+            d = state.data
+            steps = jnp.where(state.done > 0, 0, info.get("steps", jnp.zeros(d.qpos.shape[0])))
+            feat = gt.goal_features(d.qpos[:, :3], gt.yaw_from_quat(d.qpos[:, 3:7]), info["goal"][:, :2],
+                                    info["goal"][:, 2], gt.EPISODE_S - steps * self._dt)
+            obs = {**obs, "extra": feat}
         if self.hmap_fn is not None:
             hm = self.hmap_fn(state.data.qpos)
             if self.hmap_noise > 0:
@@ -152,9 +163,7 @@ class PlaygroundAdapter:
 
     def _strip(self, state):
         info = {k: v for k, v in state.info.items() if k not in ("contact", "aux")}
-        obs = state.obs
-        if self.hmap_fn is not None:
-            obs = {k: v for k, v in obs.items() if k != "heightmap"}
+        obs = {k: v for k, v in state.obs.items() if k not in ("heightmap", "extra")}
         return state.replace(info=info, obs=obs)
 
     def reset(self, rng):

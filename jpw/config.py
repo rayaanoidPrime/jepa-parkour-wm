@@ -27,6 +27,10 @@ class EnvCfg:
     # ~99.7% of steps for an untrained policy) plus a per-step alive bonus (see jpw.go1_reward).
     unclipped_reward: bool = False
     alive_bonus: float = 0.0
+    # Go1Parkour: position-goal task (TGI-ANYmal / AME2): reach a goal 2.5-3.5 m ahead within the episode
+    # (set episode_length=400 for 8 s). Adds goal features to the observation and uses the AME2 reward.
+    goal_task: bool = False
+    goal_rate_weight: float = -0.01   # action-rate penalty of the goal reward (TGI-G1 uses -0.1)
 
 
 @dataclass

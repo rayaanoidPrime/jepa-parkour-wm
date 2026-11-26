@@ -18,7 +18,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-OBS_DIM = 171
+OBS_DIM = 171          # state 48 + privileged 123
+GOAL_OBS_DIM = OBS_DIM + 5  # + goal features (jpw.goal_task) appended by the adapter in the goal task
 # --- slices of the observation vector
 LAST_ACT = slice(33, 45)
 CMD = slice(45, 48)
@@ -48,8 +49,9 @@ OFFS = np.concatenate([[0], np.cumsum(DIMS)])
 
 
 def check_layout(obs_dim: int, aux_dim: int) -> None:
-    if obs_dim != OBS_DIM or aux_dim != 19:
-        raise ValueError(f"decode_state needs Go1 with env.use_privileged=true (obs_dim {OBS_DIM}, aux 19); "
+    if obs_dim not in (OBS_DIM, GOAL_OBS_DIM) or aux_dim != 19:
+        raise ValueError(f"decode_state needs Go1 with env.use_privileged=true (obs_dim {OBS_DIM} or "
+                         f"{GOAL_OBS_DIM} with goal features, aux 19); "
                          f"got obs_dim={obs_dim}, aux_dim={aux_dim}")
 
 
@@ -58,6 +60,23 @@ def phys_targets(obs, aux):
     feet_z = aux[..., AUX_FEET].reshape(*aux.shape[:-1], 4, 3)[..., 2]
     return jnp.concatenate([obs[..., _LINVEL], obs[..., _GYRO], obs[..., _ANGVEL], obs[..., _GRAV],
                             obs[..., _JPOS], obs[..., _JVEL], obs[..., _FORCE], obs[..., _FEETVEL], feet_z], -1)
+
+
+def obs_vector(obs):
+    """Playground dict observation -> the replay layout (state ++ privileged_state), no goal features."""
+    return jnp.concatenate([obs["state"], obs["privileged_state"]], -1)
+
+
+def aux_from_data(data, feet_site_id):
+    """Base pose (pos 3 + quat 4) and feet world positions (12) of one env's mjx Data: the `aux` vector."""
+    return jnp.concatenate([data.qpos[:7], data.site_xpos[feet_site_id, :].reshape(-1)], -1)
+
+
+def reward_inputs(phys):
+    """The decoded / exact physical state in the form goal_task.GoalReward expects."""
+    s = split(phys)
+    return {"g": s["gravity"], "jpos": s["jpos"], "linvel": s["linvel"], "gyro": s["gyro"],
+            "feet_vel": s["feet_vel"]}
 
 
 def split(phys):
