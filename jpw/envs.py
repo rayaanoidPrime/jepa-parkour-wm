@@ -82,7 +82,8 @@ def make_env(cfg: EnvCfg):
         from jpw import parkour
 
         env, elev = parkour.build_env(cfg.terrain_seed, cfg.terrain_difficulty,
-                                      cfg.unclipped_reward, cfg.alive_bonus, cfg.goal_task, cfg.goal_rate_weight)
+                                      cfg.unclipped_reward, cfg.alive_bonus, cfg.goal_task, cfg.goal_rate_weight,
+                                      cfg.course_ramp, cfg.flat_goal_frac)
         if cfg.use_heightmap:
             hmap_fn = parkour.make_heightmap_fn(elev)
     elif cfg.unclipped_reward or cfg.alive_bonus:

@@ -256,3 +256,21 @@ def test_goal_task_env_features_reward_and_reset():
     for _ in range(40):  # past the 30-step episode: the timer and goal features restart with the new episode
         st = step(st, zero)
     assert float(st.obs["extra"][:, 4].max()) <= 1.0 and float(st.obs["extra"][:, 4].min()) > 0.9
+
+
+def test_graded_course_ramps_difficulty_and_has_flat_goals():
+    flat = pk.make_course(0, 1.0, ramp=False)
+    ramp = pk.make_course(0, 1.0, ramp=True)
+    xs = pk.grid_x()
+    assert np.all(ramp[xs < pk.RAMP_START_FLAT - 1e-6] == 0.0)
+    early, late = ramp[(xs > 6.0) & (xs < 10.0)], ramp[(xs > 13.0) & (xs < 19.0)]
+    assert np.clip(early, 0, None).max() < np.clip(late, 0, None).max() and ramp.max() <= flat.max() + 1e-9
+    sp, p = pk.spawn_positions(0, 1.0, ramp=True, flat_goal_frac=0.3)
+    assert abs(p.sum() - 1.0) < 1e-6 and len(sp) == len(p)
+    prof = ramp
+    is_flat = np.array([np.ptp(prof[(xs >= x) & (xs <= x + 3.5)]) < 0.03 for x in sp])
+    assert is_flat.any() and abs(p[is_flat].sum() - 0.3) < 1e-6
+    # the ungraded course has no flat-goal spawn at all (every goal needs an obstacle crossing)
+    sp0, p0 = pk.spawn_positions(0, 1.0, ramp=False)
+    prof0 = pk.make_course(0, 1.0, False)
+    assert not any(np.ptp(prof0[(xs >= x) & (xs <= x + 3.5)]) < 0.03 for x in sp0)

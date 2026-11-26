@@ -31,6 +31,11 @@ class EnvCfg:
     # (set episode_length=400 for 8 s). Adds goal features to the observation and uses the AME2 reward.
     goal_task: bool = False
     goal_rate_weight: float = -0.01   # action-rate penalty of the goal reward (TGI-G1 uses -0.1)
+    # Go1Parkour: graded course (obstacle difficulty ramps up along x after a longer flat start) and the share
+    # of spawns whose path to the goal has no obstacle. Each env keeps one spawn for the whole run
+    # (Playground's auto-reset restores the first state), so this fixed mixture is the curriculum.
+    course_ramp: bool = False
+    flat_goal_frac: float = 0.0
 
 
 @dataclass

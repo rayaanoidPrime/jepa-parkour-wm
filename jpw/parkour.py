@@ -32,6 +32,7 @@ RES = 0.04          # grid resolution
 NCOL = int(round(2 * RX / RES)) + 1
 NROW = int(round(2 * RY / RES)) + 1
 START_FLAT = 2.0    # flat run before the first obstacle (spawn is at x in [-0.5, 0.5])
+RAMP_START_FLAT = 6.0  # graded course: longer flat start so some goals need no obstacle crossing
 FINISH_X = 19.0     # reaching this x ends the episode (success)
 LANE_HALF = RY - 0.5
 
@@ -90,11 +91,13 @@ def grid_x() -> np.ndarray:
     return POSX + np.linspace(-RX, RX, NCOL)
 
 
-def make_course(seed: int = 0, difficulty: float = 1.0) -> np.ndarray:
+def make_course(seed: int = 0, difficulty: float = 1.0, ramp: bool = False) -> np.ndarray:
     """Height profile along x, relative to the ground (m); shape [NCOL]. <0 is a pit.
 
     difficulty in (0, 1] scales step height / gap width. Segments: stairs up and down, boxes
-    (step up, plateau, step down) and gaps, separated by flat runs.
+    (step up, plateau, step down) and gaps, separated by flat runs. With `ramp` the difficulty of each
+    segment grows linearly from 0.05 at the end of a longer flat start to `difficulty` at the far end, so a
+    spawn position doubles as a curriculum level.
     """
     rng = np.random.default_rng(seed)
     xs = grid_x()
@@ -104,8 +107,11 @@ def make_course(seed: int = 0, difficulty: float = 1.0) -> np.ndarray:
     def paint(lo, hi, val):
         h[(xs >= lo) & (xs < hi)] = val
 
-    x = START_FLAT
+    start = RAMP_START_FLAT if ramp else START_FLAT
+    x = start
     while x < FINISH_X - 2.5:
+        if ramp:
+            d = float(np.clip(difficulty * (x - start) / (FINISH_X - 4.0 - start), 0.05, 1.0))
         kind = rng.choice(["stairs", "box", "gap"])
         if kind == "stairs":
             n = int(rng.integers(3, 5))
@@ -130,9 +136,9 @@ def make_course(seed: int = 0, difficulty: float = 1.0) -> np.ndarray:
     return h
 
 
-def make_elevation(seed: int = 0, difficulty: float = 1.0) -> np.ndarray:
+def make_elevation(seed: int = 0, difficulty: float = 1.0, ramp: bool = False) -> np.ndarray:
     """Absolute ground height [NROW, NCOL] in metres (uniform across the lane)."""
-    prof = G + make_course(seed, difficulty)
+    prof = G + make_course(seed, difficulty, ramp)
     return np.tile(prof[None, :], (NROW, 1))
 
 
@@ -181,17 +187,28 @@ def make_heightmap_pose_fn(elev: np.ndarray):
     return fn
 
 
-def spawn_positions(seed: int = 0, difficulty: float = 1.0) -> np.ndarray:
-    """x positions on the course that are flat within +-0.8 m (safe places to spawn for the goal task)."""
-    prof, xs = make_course(seed, difficulty), grid_x()
-    cand = np.arange(-0.5, FINISH_X - 4.0, 0.25)
-    ok = [x for x in cand if np.ptp(prof[(xs >= x - 0.8) & (xs <= x + 0.8)]) < 1e-6]
-    return np.asarray(ok, np.float32)
+def spawn_positions(seed: int = 0, difficulty: float = 1.0, ramp: bool = False,
+                    flat_goal_frac: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    """(x positions flat within +-0.8 m = safe spawns, sampling probabilities).
+
+    A spawn is a "flat goal" spawn when the terrain from the spawn to 3.5 m ahead has < 3 cm relief (no
+    obstacle to cross). With flat_goal_frac > 0 those spawns get that total probability and the rest share
+    the remainder; 0 = uniform over the safe positions.
+    """
+    prof, xs = make_course(seed, difficulty, ramp), grid_x()
+    cand = np.arange(-0.5, FINISH_X - 4.0, 0.1)
+    ok = np.asarray([x for x in cand if np.ptp(prof[(xs >= x - 0.8) & (xs <= x + 0.8)]) < 1e-6], np.float32)
+    flat = np.asarray([np.ptp(prof[(xs >= x) & (xs <= x + 3.5)]) < 0.03 for x in ok])
+    probs = np.full(len(ok), 1.0 / len(ok))
+    if flat_goal_frac > 0 and flat.any() and (~flat).any():
+        probs = np.where(flat, flat_goal_frac / flat.sum(), (1.0 - flat_goal_frac) / (~flat).sum())
+    return ok, probs / probs.sum()
 
 
 # ---- environment ---------------------------------------------------------------------------
 def build_env(seed: int = 0, difficulty: float = 1.0, unclipped_reward: bool = False,
-              alive_bonus: float = 0.0, goal_task: bool = False, goal_rate_weight: float = -0.01):
+              alive_bonus: float = 0.0, goal_task: bool = False, goal_rate_weight: float = -0.01,
+              course_ramp: bool = False, flat_goal_frac: float = 0.0):
     """Returns (unwrapped Playground env, elevation array)."""
     import mujoco
     from mujoco import mjx
@@ -199,9 +216,10 @@ def build_env(seed: int = 0, difficulty: float = 1.0, unclipped_reward: bool = F
     from mujoco_playground._src.locomotion.go1 import base as go1_base
     from mujoco_playground._src.locomotion.go1 import joystick as go1_joystick
 
-    elev = make_elevation(seed, difficulty).astype(np.float32)
+    elev = make_elevation(seed, difficulty, course_ramp).astype(np.float32)
     elev_j = jnp.asarray(elev)
-    spawn_xs = jnp.asarray(spawn_positions(seed, difficulty))
+    sp_x, sp_p = spawn_positions(seed, difficulty, course_ramp, flat_goal_frac)
+    spawn_xs, spawn_p = jnp.asarray(sp_x), jnp.asarray(sp_p, jnp.float32)
     ground_fn = lambda x, y: ground_height(elev_j, x, y)  # noqa: E731
     base = go1_joystick.Joystick
     if unclipped_reward or alive_bonus:
@@ -242,7 +260,7 @@ def build_env(seed: int = 0, difficulty: float = 1.0, unclipped_reward: bool = F
             qpos = qpos.at[0:2].add(jax.random.uniform(k1, (2,), minval=-0.5, maxval=0.5))
             if goal_task:  # spawn on a flat patch of the course, goal 2.5-3.5 m ahead
                 rng, k_sp, k_gd = jax.random.split(rng, 3)
-                sx = jax.random.choice(k_sp, spawn_xs)
+                sx = jax.random.choice(k_sp, spawn_xs, p=spawn_p)
                 sy = jax.random.uniform(k1, (), minval=-0.5, maxval=0.5)
                 qpos = qpos.at[0].set(sx).at[1].set(sy).at[2].set(0.35 + ground_fn(sx, sy))
                 gx = jnp.minimum(sx + jax.random.uniform(k_gd, (), minval=2.5, maxval=3.5), FINISH_X - 0.3)
