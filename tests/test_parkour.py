@@ -264,7 +264,11 @@ def test_graded_course_ramps_difficulty_and_has_flat_goals():
     xs = pk.grid_x()
     assert np.all(ramp[xs < pk.RAMP_START_FLAT - 1e-6] == 0.0)
     early, late = ramp[(xs > 6.0) & (xs < 10.0)], ramp[(xs > 13.0) & (xs < 19.0)]
-    assert np.clip(early, 0, None).max() < np.clip(late, 0, None).max() and ramp.max() <= flat.max() + 1e-9
+    def step(w):  # largest single step, ignoring the fixed-depth pit edges
+        s = np.abs(np.diff(w))
+        return s[s < 0.249].max()
+
+    assert step(early) < step(late) and ramp.max() <= flat.max() + 1e-9
     sp, p = pk.spawn_positions(0, 1.0, ramp=True, flat_goal_frac=0.3)
     assert abs(p.sum() - 1.0) < 1e-6 and len(sp) == len(p)
     prof = ramp
