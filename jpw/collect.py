@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 
 from jpw.agent import Agent
-from jpw.envs import get_contact, get_hmap, get_obs
+from jpw.envs import get_aux, get_contact, get_hmap, get_obs
 
 
 def make_collect(env, agent: Agent, n_steps: int, use_priv: bool, use_hmap: bool = False,
@@ -45,6 +45,9 @@ def make_collect(env, agent: Agent, n_steps: int, use_priv: bool, use_hmap: bool
             contact = get_contact(nxt)
             if contact is not None:
                 out["contact"] = contact
+            aux = get_aux(es)  # physical state at the same time as obs
+            if aux is not None:
+                out["aux"] = aux
             return (nxt, key, ep_ret), out
 
         (es, key, ep_ret), out = jax.lax.scan(body, (env_state, key, ep_ret), None, length=n_steps)

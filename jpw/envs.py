@@ -8,6 +8,8 @@ Every env here follows the Brax/Playground convention used by the rest of the co
 Optional extras the models can use:
   obs["heightmap"]        [N, H, W]  heightmap / depth image (EnvCfg.use_heightmap)
   state.info["contact"]   [N, C]     contact flags *after* the step, e.g. one per foot
+  state.info["aux"]       [N, X]     physical state at the current time (Go1: base pos 3 + quat 4 + feet
+                                     world pos 12), added by PlaygroundAdapter for Go1 envs
 """
 from __future__ import annotations
 
@@ -44,18 +46,26 @@ def get_contact(state):
     return None if c is None else c.astype(jnp.float32)
 
 
+def get_aux(state):
+    """Aux physical state [N, X] (float32) from state.info, or None."""
+    a = state.info.get("aux") if hasattr(state, "info") else None
+    return None if a is None else a.astype(jnp.float32)
+
+
 def get_spec(state, cfg: EnvCfg, act_dim: int) -> Spec:
     """Describe what an env produces, from one reset state."""
     prop = state.obs["state"].shape[-1] if isinstance(state.obs, Mapping) else None
     obs_dim = get_obs(state.obs, cfg.use_privileged).shape[-1]
     h = get_hmap(state.obs, cfg.use_heightmap)
     c = get_contact(state)
+    ax = get_aux(state)
     if cfg.use_heightmap and h is None:
         raise ValueError(f"env.use_heightmap=true but {cfg.name!r} provides no obs['heightmap']")
     return Spec(
         obs_dim=obs_dim, prop_dim=obs_dim if prop is None else prop, act_dim=act_dim,
         hmap_shape=None if h is None else tuple(h.shape[-2:]),
         contact_dim=0 if c is None else int(c.shape[-1]),
+        aux_dim=0 if ax is None else int(ax.shape[-1]),
     )
 
 
@@ -113,6 +123,9 @@ class PlaygroundAdapter:
     def __init__(self, env, hmap_fn=None, hmap_noise: float = 0.0):
         self.env, self.hmap_fn, self.hmap_noise = env, hmap_fn, hmap_noise
         self.action_size = env.action_size
+        # Go1: expose base pose + feet world positions as aux physical state
+        base = getattr(env, "unwrapped", None)
+        self._feet_site = getattr(base, "_feet_site_id", None)
 
     def __getattr__(self, name):  # forward anything else (dt, mj_model, ...)
         return getattr(self.env, name)
@@ -121,6 +134,10 @@ class PlaygroundAdapter:
         info = dict(state.info)
         if "last_contact" in info:
             info["contact"] = info["last_contact"].astype(jnp.float32)
+        if self._feet_site is not None:
+            d = state.data
+            feet = d.site_xpos[:, self._feet_site, :].reshape(d.qpos.shape[0], -1)
+            info["aux"] = jnp.concatenate([d.qpos[:, :7], feet], axis=-1)
         obs = state.obs
         if self.hmap_fn is not None:
             hm = self.hmap_fn(state.data.qpos)
@@ -134,7 +151,7 @@ class PlaygroundAdapter:
         return state.replace(info=info, obs=obs)
 
     def _strip(self, state):
-        info = {k: v for k, v in state.info.items() if k != "contact"}
+        info = {k: v for k, v in state.info.items() if k not in ("contact", "aux")}
         obs = state.obs
         if self.hmap_fn is not None:
             obs = {k: v for k, v in obs.items() if k != "heightmap"}

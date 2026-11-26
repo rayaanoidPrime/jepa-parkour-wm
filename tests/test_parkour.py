@@ -174,3 +174,39 @@ def test_unclipped_reward_matches_terms_and_alive_bonus():
     assert float(clipped.reward.min()) >= 0.0 and float(raw.reward.min()) < 0.0  # the clip removed signal
     np.testing.assert_allclose(np.asarray(bonus.reward - raw.reward), 0.05 * (1 - np.asarray(raw.done)),
                                atol=1e-6)
+
+
+@requires_sim
+def test_analytic_go1_reward_matches_playground_terms():
+    """The reward recomputed from the exact physical state equals Playground's per-term reward."""
+    from jpw import go1_state as gs
+    from jpw.config import EnvCfg
+    from jpw.envs import get_aux, make_env
+
+    cfg = EnvCfg(name="Go1JoystickFlatTerrain", num_envs=16, episode_length=200, use_privileged=True,
+                 unclipped_reward=True)
+    env = make_env(cfg)
+    task = gs.Go1Task.from_env(env)
+    reset, step = jax.jit(env.reset), jax.jit(env.step)
+    st = reset(jax.random.split(jax.random.PRNGKey(0), 16))
+    assert st.obs["state"].shape[-1] + st.obs["privileged_state"].shape[-1] == gs.OBS_DIM
+    key = jax.random.PRNGKey(1)
+    worst = {}
+    for t in range(12):
+        key, k = jax.random.split(key)
+        a = jax.random.uniform(k, (16, env.action_size), minval=-1.0, maxval=1.0)
+        prev = st
+        st = step(prev, a)
+        obs = jnp.concatenate([st.obs["state"], st.obs["privileged_state"]], -1)
+        phys = gs.phys_targets(obs, get_aux(st))
+        mine = task.terms(phys, a, prev.info["last_act"], prev.info["command"], st.info["contact"])
+        for k2, v in mine.items():
+            real = st.metrics[f"reward/{k2}"]
+            err = float(jnp.max(jnp.abs(v - real)) / (float(jnp.max(jnp.abs(real))) + 1e-3))
+            worst[k2] = max(worst.get(k2, 0.0), err)
+    exact = ["tracking_lin_vel", "tracking_ang_vel", "ang_vel_xy", "pose", "dof_pos_limits", "action_rate",
+             "torques", "energy", "stand_still", "feet_slip", "feet_clearance"]
+    for k2 in exact:
+        assert worst[k2] < 2e-3, (k2, worst[k2])
+    # approximations (body-frame gravity / velocity instead of the world-frame torso axis / velocity)
+    assert worst["orientation"] < 0.5 and worst["lin_vel_z"] < 0.5, worst

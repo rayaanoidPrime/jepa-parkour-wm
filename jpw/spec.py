@@ -11,6 +11,7 @@ class Spec:
     act_dim: int
     hmap_shape: tuple[int, int] | None = None   # (H, W) heightmap / depth image, or None
     contact_dim: int = 0                  # number of contact flags (e.g. feet), 0 = none
+    aux_dim: int = 0                      # extra physical state kept in replay (Go1: base pose 7 + feet pos 12)
 
     def to_dict(self) -> dict:
         return asdict(self)

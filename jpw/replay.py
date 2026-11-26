@@ -8,6 +8,8 @@ done_t = 1. r_t, done_t and contact_t describe the state *after* applying a_t.
 Optional fields (None when the env doesn't provide them):
   hmap     [T, N, H, W]  heightmap / depth image seen with obs_t, stored in bfloat16
   contact  [T, N, C]     contact flags after step t
+  aux      [T, N, X]     physical state at time t that the observation does not contain (Go1: base
+                         position + quaternion, feet world positions); decoder targets / terrain lookups
 """
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ from flax import struct
 
 from jpw.spec import Spec
 
-FIELDS = ("obs", "act", "rew", "done", "trunc", "hmap", "contact")
+FIELDS = ("obs", "act", "rew", "done", "trunc", "hmap", "contact", "aux")
 
 
 @struct.dataclass
@@ -32,6 +34,7 @@ class Replay:
     size: jax.Array   # int32 scalar: rows filled
     hmap: jax.Array | None = None      # [T, N, H, W]
     contact: jax.Array | None = None   # [T, N, C]
+    aux: jax.Array | None = None       # [T, N, X]
 
 
 def init(capacity: int, num_envs: int, spec: Spec) -> Replay:
@@ -48,10 +51,11 @@ def init(capacity: int, num_envs: int, spec: Spec) -> Replay:
         else jnp.zeros((capacity, num_envs, *spec.hmap_shape), jnp.bfloat16),
         contact=None if not spec.contact_dim
         else jnp.zeros((capacity, num_envs, spec.contact_dim), f),
+        aux=None if not spec.aux_dim else jnp.zeros((capacity, num_envs, spec.aux_dim), f),
     )
 
 
-def add(rb: Replay, obs, act, rew, done, trunc, hmap=None, contact=None) -> Replay:
+def add(rb: Replay, obs, act, rew, done, trunc, hmap=None, contact=None, aux=None) -> Replay:
     """Append a chunk of S time steps (arrays shaped [S, N, ...])."""
     cap = rb.obs.shape[0]
     s = obs.shape[0]
@@ -69,6 +73,8 @@ def add(rb: Replay, obs, act, rew, done, trunc, hmap=None, contact=None) -> Repl
         upd["hmap"] = rb.hmap.at[idx].set(hmap.astype(rb.hmap.dtype))
     if rb.contact is not None:
         upd["contact"] = rb.contact.at[idx].set(contact.astype(rb.contact.dtype))
+    if rb.aux is not None:
+        upd["aux"] = rb.aux.at[idx].set(aux.astype(rb.aux.dtype))
     return rb.replace(**upd)
 
 
@@ -119,4 +125,6 @@ def sample(rb: Replay, key: jax.Array, batch: int, length: int) -> dict:
         out["hmap"] = rb.hmap[t, e].astype(jnp.float32)
     if rb.contact is not None:
         out["contact"] = rb.contact[t, e]
+    if rb.aux is not None:
+        out["aux"] = rb.aux[t, e]
     return out
