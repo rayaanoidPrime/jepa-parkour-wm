@@ -135,6 +135,31 @@ results too: tracking never improved because it is a 10x smaller signal than the
 much smaller bonus (e.g. 0.005-0.01) or none with a strong termination penalty instead, as AME2 / TGI do (-500 per
 second on termination, no alive bonus), and keep the progress / goal terms large relative to any survival term.
 
+### 11. Terrain-grounded goal-reaching agent (window 2; single seed; Go1Parkour goal task)
+Built: world-model dynamics conditioned on the heightmap at the pose; actor / critic input = latent + goal features +
+heightmap computed at the pose integrated in imagination; imagined states scored with the AME2 goal reward (no alive
+bonus, termination penalty -500/s); goal-task eval (success = within 0.5 m at the 8 s time limit).
+
+- **g1 (course with obstacles everywhere, 3000 iterations, 1024 envs, 36 min):** survival solved (episodes run to the time
+  limit, 99-100% timeouts, vs 69 steps for the first parkour run) but 0% goal success, final distance 1.8 m of about 3.
+  A CPU eval split showed why: in that course *every* spawn-to-goal path crossed an obstacle (flat_n = 0 of 128), and the
+  course had only 8 safe spawn positions. There were no easy goals to learn from or to measure walking on.
+- **Fix:** graded course (`env.course_ramp=true`: flat start of 6 m, obstacle difficulty ramps from 0.05 to 1.0 along
+  the course) and a fixed mixture with 30% flat-goal spawns (`env.flat_goal_frac=0.3`); finer spawn grid (61 safe
+  positions instead of 21). Each env keeps one spawn for the whole run (Playground's auto-reset restores the first
+  state), so this fixed mixture is the curriculum; a success-guided curriculum like TGI's would need custom reset logic.
+- **g3 (graded course, 4000 iterations, 1024 envs, 46 min training, 8.2M env steps, 1 seed):**
+
+| checkpoint | goal success | flat goals | obstacle goals | final dist | episode length (of 400) |
+|---|---|---|---|---|---|
+| 1000 it | 24% | 54% | 11% | 0.71 m | 223 |
+| 2000 it | 78% | 99% | 64% | 0.30 m | 347 |
+| 3000 it | 83% | 94% | 76% | 0.24 m | 356 |
+| 4000 it (final) | 80% | 99% | 69% | 0.36 m | 339 |
+
+  Training episode return rose from 11 to about 140-160 (the goal-proximity reward). About 80% of eval episodes reach the
+  time limit; the rest end early (fall, pit, lane).
+
 ## Status and what is left
 
 **Done and tested** (CPU tests + short GPU runs): everything in the code map. The goal-reaching *environment*
