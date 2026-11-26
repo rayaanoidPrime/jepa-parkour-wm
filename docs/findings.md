@@ -125,6 +125,16 @@ themselves.
   events (spin, belly contact, slip) -1; roll, joint, action-rate, joint-limit, power penalties; facing the goal +2;
   lateral velocity -1; foot impact -3; termination -500 per second.
 
+### 10. Validation of the flat recipe on the existing parkour env (jobs 6435 / 6436, 1 GPU, 11 min, 2.2M env steps)
+Setup: `Go1Parkour` (velocity command + progress reward, difficulty 0.5, no DR, no student), unclipped reward,
+alive bonus 0.05, fixed noise 0.1, stabilisers, learned heads. Eval of the EMA actor: **episode length 997 of 1000, but progress
+only 0.13 m and 0% success.** The policy survives the whole episode by standing still: the alive bonus (0.05 per step,
+about 50 per episode) is worth far more than the progress reward (1.0 per metre, about 0.02 per step at 1 m/s) and the
+tracking terms (about 0.005 per step). This is reward hacking by the bonus, and it likely explains the flat-terrain
+results too: tracking never improved because it is a 10x smaller signal than the bonus. Hypothesis (untested): use a
+much smaller bonus (e.g. 0.005-0.01) or none with a strong termination penalty instead, as AME2 / TGI do (-500 per
+second on termination, no alive bonus), and keep the progress / goal terms large relative to any survival term.
+
 ## Status and what is left
 
 **Done and tested** (CPU tests + short GPU runs): everything in the code map. The goal-reaching *environment*
@@ -150,7 +160,8 @@ Honest state: there is no recipe validated on parkour yet. Options:
 
 - **A. Validate on the existing parkour env first (about 15 minutes).** `slurm/train.sbatch` with the flat recipe
   (unclipped reward, alive 0.05, fixed noise 0.1, stabilisers, easier terrain `env.terrain_difficulty=0.5`) was
-  launched as `exp-pk-val` (jobs 6435 / 6436); its result is appended below if it finished in time.
+  ran as `exp-pk-val` (jobs 6435 / 6436): it survives but does not progress (finding 10), so the alive-bonus-based
+  recipe is NOT ready for a long parkour run. The goal-reaching reward uses a termination penalty instead of a bonus.
 - **B. Finish the grounded goal agent (steps 1-4 above), then run.** This is the TGI-style route and the one most
   likely to learn obstacle crossing, but it is not built.
 - **Suggested first long run settings once a recipe is chosen** (2 GPUs, `--gres=gpu:2`): `env.num_envs=4096`,
