@@ -61,12 +61,19 @@ def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0) -> dict:
             n_trunc = jnp.zeros(())
         out = (jnp.sum(jnp.where(done, ret, 0.0)), jnp.sum(jnp.where(done, length, 0)),
                jnp.sum(done), prog, succ, n_trunc)
+        if goal:  # split by terrain relief between spawn and goal (flat vs obstacle on the way)
+            obst = nxt.info["obstacle"] > 0.03
+            ok = done & trunc & (gd < 0.5)
+            out = out + (jnp.sum(done & ~obst), jnp.sum(ok & ~obst), jnp.sum(jnp.where(done & ~obst, gd, 0.0)),
+                         jnp.sum(done & obst), jnp.sum(ok & obst), jnp.sum(jnp.where(done & obst, gd, 0.0)))
+        else:
+            out = out + (jnp.zeros(()),) * 6
         terms = {k: jnp.sum(v) for k, v in getattr(nxt, "metrics", {}).items() if k.startswith("reward/")}
         return (nxt, jnp.where(done, 0.0, ret), jnp.where(done, 0, length),
                 jnp.where(done, x, xmax)), out, terms
 
     carry = (state, jnp.zeros(n), jnp.zeros(n, jnp.int32), jnp.zeros(n))
-    tot = np.zeros(6)
+    tot = np.zeros(12)
     term_tot: dict[str, float] = {}
     steps_done = 0
     max_steps = cfg.env.episode_length * (-(-episodes // n) + 1)
@@ -78,13 +85,15 @@ def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0) -> dict:
         steps_done += 1
         if tot[2] >= episodes:
             break
-    ret, length, count, xmax, success, n_trunc = tot
+    ret, length, count, xmax, success, n_trunc, n_flat, s_flat, d_flat, n_obs, s_obs, d_obs = tot
     res = {"episodes": int(count), "return": ret / max(count, 1), "length": length / max(count, 1)}
     if parkour:
         res.update({"progress_m": xmax / max(count, 1), "success_rate": success / max(count, 1)})
     if goal:
         res.update({"final_dist_m": xmax / max(count, 1), "goal_success_rate": success / max(count, 1),
-                    "timeout_frac": n_trunc / max(count, 1)})
+                    "timeout_frac": n_trunc / max(count, 1),
+                    "flat_n": int(n_flat), "flat_success": s_flat / max(n_flat, 1), "flat_dist_m": d_flat / max(n_flat, 1),
+                    "obst_n": int(n_obs), "obst_success": s_obs / max(n_obs, 1), "obst_dist_m": d_obs / max(n_obs, 1)})
     dt = float(getattr(env, "dt", 0.02))
     res["terms"] = {k[len("reward/"):]: dt * v / max(steps_done * n, 1) for k, v in term_tot.items()}
     return res

@@ -275,6 +275,9 @@ def build_env(seed: int = 0, difficulty: float = 1.0, unclipped_reward: bool = F
                 info["command"] = jnp.zeros(3)
                 info["goal"] = jnp.stack([gx, qpos[1], jnp.zeros(())])
                 info["goal_dist"] = jnp.abs(gx - qpos[0])
+                line = qpos[0] + (gx - qpos[0]) * jnp.linspace(0.0, 1.0, 25)  # terrain relief between spawn and goal
+                prof_line = ground_fn(line, jnp.full_like(line, sy))
+                info["obstacle"] = prof_line.max() - prof_line.min()
             metrics = {f"reward/{k}": jnp.zeros(()) for k in cfg.reward_config.scales.keys()}
             metrics["swing_peak"] = jnp.zeros(())
             obs = self._get_obs(data, info)
