@@ -26,8 +26,7 @@ for name in sys.argv[1:]:
         continue
     col = lambda k: np.array([r.get(k) if r.get(k) is not None else np.nan for r in rows], float)
     it = col("perf/iter")
-    print(f"
-== {name}: {len(rows)} logged points")
+    print(f"\n== {name}: {len(rows)} logged points")
     print(f"{'iter':>6} {'imag_r/step':>12} {'real_r/step':>12} {'gap':>9} {'phys_linvel':>12} {'actor_gn':>9}")
     for lo in range(0, int(it.max()) + 1, 400):
         m = (it >= lo) & (it < lo + 400)
