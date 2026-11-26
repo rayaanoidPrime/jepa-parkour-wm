@@ -93,7 +93,7 @@ def open_loop_error(t0):  # model driven by the REAL actions, decoded state vs r
         return z1, agent.decode_phys(ts.wm, z1)
     z0 = agent.encode(ts.wm, obs_a[t0])
     _, ph = jax.lax.scan(body, z0, jnp.arange(H))
-    return ph - phys_a[t0 + 1:t0 + 1 + H]
+    return ph - jax.lax.dynamic_slice_in_dim(phys_a, t0 + 1, H, axis=0)
 
 
 imag_r, real_r = [], []
