@@ -64,6 +64,8 @@ class ACCfg:
     critic_ema: float = 0.98
     min_std: float = 0.05
     max_std: float = 1.0
+    # > 0: constant action noise std instead of a learned one (SuperMimic uses 0.1). Set ent_coef=0 with it.
+    fixed_std: float = 0.0
     grad_clip: float = 1.0
     # Deployable actor: acts on a student encoder of proprioception (+ heightmap) only, trained to
     # regress the privileged world-model latent. Imagination still uses the privileged latent.

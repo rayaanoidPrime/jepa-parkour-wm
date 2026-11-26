@@ -135,3 +135,10 @@ def test_eval_runs_on_checkpoint(tmp_path, capsys):
                       "--set", "env.episode_length=20"])
     assert res["episodes"] >= 16 and res["length"] == 20 and np.isfinite(res["return"])
     assert "EVAL" in capsys.readouterr().out
+
+
+def test_fixed_action_std(tmp_path):
+    cfg, env, spec, agent, ts = _setup("dummy", ["ac.fixed_std=0.1", "ac.ent_coef=0.0"])
+    mean, std = agent.actor.apply(ts.actor, jnp.zeros((3, cfg.wm.latent_dim)))
+    np.testing.assert_allclose(np.asarray(std), 0.1)
+    _run(tmp_path, "dummy", ["ac.fixed_std=0.1", "ac.ent_coef=0.0"])

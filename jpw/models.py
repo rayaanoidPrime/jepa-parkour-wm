@@ -139,11 +139,14 @@ class Actor(nn.Module):
     depth: int
     min_std: float = 0.05
     max_std: float = 1.0
+    fixed_std: float = 0.0   # > 0: constant action noise (SuperMimic-style) instead of a learned std
 
     @nn.compact
     def __call__(self, z):
         x = MLP(self.hidden, self.depth, 2 * self.act_dim)(z)
         mean, s = jnp.split(x, 2, axis=-1)
+        if self.fixed_std > 0:
+            return mean, jnp.full_like(mean, self.fixed_std)
         std = self.min_std + (self.max_std - self.min_std) * nn.sigmoid(s + 2.0)
         return mean, std
 

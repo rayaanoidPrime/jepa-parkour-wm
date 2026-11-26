@@ -69,7 +69,7 @@ class Agent:
             use_hmap=spec.hmap_shape is not None, cnn_channels=w.cnn_channels,
             contact_dim=spec.contact_dim, asymmetric=a.asymmetric,
         )
-        self.actor = Actor(spec.act_dim, a.hidden, a.depth, a.min_std, a.max_std)
+        self.actor = Actor(spec.act_dim, a.hidden, a.depth, a.min_std, a.max_std, a.fixed_std)
         self.critic = Critic(a.hidden, a.depth)
         self.wm_tx = optax.chain(optax.clip_by_global_norm(w.grad_clip), optax.adam(w.lr))
         self.actor_tx = optax.chain(optax.clip_by_global_norm(a.grad_clip), optax.adam(a.actor_lr))
