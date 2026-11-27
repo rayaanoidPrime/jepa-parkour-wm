@@ -20,7 +20,10 @@ strong hints, not proof. No large run has been launched.
 4. **The terrain-grounded goal-reaching agent (TGI-ANYmal style) works on our parkour course.** Single seed, 1 GPU,
    46 minutes of training (4000 iterations, 8.2M env steps): **80% goal success** (within 0.5 m of a goal 2.5-3.5 m
    ahead at the 8 s limit; 99% on flat goals, 69-76% across obstacles), and **82-97% on three held-out courses** it never
-   trained on. 78% was reached after about 2000 iterations (about 23 minutes). See finding 11 and 12.
+   trained on. 78% was reached after about 2000 iterations (about 23 minutes). **Domain randomisation is essential:** the
+   same policy trained without it collapses to 0% (falls in about 45 steps) under randomised physics, while the one trained
+   with randomisation + 1 cm heightmap noise (g4) reaches 84% clean and keeps 66-92% under randomised physics and 2 cm
+   heightmap noise. See findings 11-13.
 5. **Speed:** about 0.69 s per iteration at 1024 envs on one GPU; two GPUs with twice the envs and batch cost the same
    per iteration (tested, replicas in sync), so a 20k-iteration run is about 3.8 h. XLA Triton GEMM must be off on this
    ROCm stack (it produces NaNs) and that costs nothing.
@@ -194,6 +197,35 @@ Caveats: single seed; evaluation uses the exact heightmap and exact physical sta
 deployable (proprioception + depth) actor; the obstacle success is not monotonic across checkpoints (64% / 76% / 69%);
 about 20% of evaluation episodes end early (fall, pit, lane).
 
+### 13. Domain randomisation: g4 and the robustness test (single seed)
+g4 = g3's recipe + `env.domain_randomization=true env.hmap_noise=0.01` (Playground's Go1 randomiser: floor friction, link and
+torso mass, COM, joint friction / armature, nominal pose, plus per-env motor strength +-15%), 4000 iterations, 1 GPU, 45 min.
+Clean evaluation (randomisation off), training course:
+
+| checkpoint | goal success | flat | obstacle | final dist |
+|---|---|---|---|---|
+| 1000 it | 63% | 97% | 45% | 0.52 m |
+| 2000 it | 66% | 95% | 52% | 0.48 m |
+| 3000 it | 80% | 95% | 71% | 0.24 m |
+| 4000 it (final) | **84%** | 100% | 74% | 0.19 m |
+
+Randomisation did not hurt (g3, no randomisation: 80% at the same budget); it was slower early and still rising at the end
+(unlike g3, which plateaued around 78-83% from 2000 iterations).
+
+Robustness (`slurm/eval_robust.sbatch`: randomised physics + 2 cm heightmap noise, i.e. twice g4's training noise), final
+checkpoints:
+
+| policy | training course | held-out seed 1 | held-out seed 2 |
+|---|---|---|---|
+| g3 (no randomisation in training) | 0% (43 steps) | 0% (43 steps) | 0% (39 steps) |
+| g4 (randomisation + noise in training) | 66% | 92% | 70% |
+
+Decomposition on g3: heightmap noise alone (2 cm, no physics randomisation) leaves 72% success (vs about 80% clean); physics
+randomisation alone gives 0% success (46-step episodes). So it is the dynamics randomisation that breaks a policy trained
+without it, and training with it fixes that. Which individual parameter (friction, mass, COM, joint friction, nominal-pose
+jitter, motor strength) matters most was not isolated. The evaluation randomisation is the training distribution, not
+out-of-distribution physics.
+
 ## Status and what is left
 
 **Done and tested:** everything in the code map, including the grounded goal agent (terrain-conditioned dynamics, actor /
@@ -212,7 +244,8 @@ randomisation (smoke). 24 unit / integration tests (CPU) plus short GPU runs.
 
 ## Recommendation for the long run
 
-Use the recipe that produced g3 (+ g4, see below), at the scale that was smoke-tested:
+Use the g4 recipe (randomisation on: g3's recipe without it collapses under randomised physics), at the scale that was
+smoke-tested (200 iterations, 2 GPUs, randomisation + noise on):
 
 ```bash
 sbatch --gres=gpu:2 --cpus-per-task=32 --mem=256G slurm/train.sbatch --preset goal --run-name goal-long --set \
@@ -225,13 +258,15 @@ sbatch --gres=gpu:2 --cpus-per-task=32 --mem=256G slurm/train.sbatch --preset go
 Estimated 3.8 h (0.69 s per iteration). The `goal` preset already sets: grounded actor, decoder heads, fixed action noise 0.1
 with no entropy bonus, EMA actor 0.995, element-wise gradient clip 0.1, Adam beta2 0.95, 2 collection steps and 8 + 8
 updates per iteration. Things you may want to decide differently:
-- A longer horizon is only worthwhile if success keeps rising: g3 plateaued around 78-83% from 2000 iterations at 1024
-  envs, so the long run is mostly about harder terrain and robustness, not about reaching 80% faster.
+- g3 (no randomisation) plateaued around 78-83% from 2000 iterations, but g4 (randomisation) was still rising at 4000
+  iterations (63 / 66 / 80 / 84%), so with randomisation a longer run is worthwhile.
 - If you want a harder test, raise `env.terrain_difficulty` (the ramp's maximum, 1.0 now) is already at its cap; the next
   lever is new obstacle types (needs code).
 - The 24-test suite and `docs/findings.md` are the reference for what is verified.
 
 ## Open questions for you
+0. How strong should the randomisation be for the long run? g4 used Playground's defaults + motor strength +-15% and 1 cm
+   heightmap noise; the parameters were not tuned and not compared individually.
 1. Is the corridor-with-goals setting (one terrain family, forward goals) the right target for the first long run, or should
    it include stepping stones / pits first?
 2. Do you want the deployable (proprioception + depth) actor integrated before the long run, or after we see the
