@@ -116,10 +116,10 @@ def _rough(u, rng):
     return np.kron(cells, np.ones((c, c)))[:NS, :NS]
 
 
-def _stones(u, rng):
+def _stones(u, rng, pit=1.0):
     level = int(round(u * (NUM_LEVELS - 1)))
     rects, a = stones_everywhere_rects(level, (TILE, TILE), rng)
-    floor_z = -rng.uniform(0.8, 1.5)  # TGI: -1.5 .. -0.35; kept deep so a fall is unrecoverable (env terminates below z = -0.5)
+    floor_z = -pit * rng.uniform(0.8, 1.5)  # TGI: -1.5 .. -0.35; kept deep so a fall is unrecoverable (env terminates below z = -0.5)
     h = np.full((NS, NS), floor_z)
     ax = (np.arange(NS) + 0.5) * RES
     X, Y = np.meshgrid(ax, ax, indexing="xy")
@@ -138,14 +138,14 @@ def _climb(u, up: bool):
     return np.where(inside, -depth, 0.0) if up else np.where(inside, depth, 0.0)
 
 
-def _gap(u):
+def _gap(u, pit=1.0):
     X, Y, D = _coords()
     g = _lerp(0.10, 1.00, u) * 0.35                                  # TGI gap 0.1-1.0 m; Go1 0.035-0.35
     p = PLATFORM / 2
-    return np.where(D < p, 0.0, np.where(D < p + g, -1.5, 0.0))
+    return np.where(D < p, 0.0, np.where(D < p + g, -1.5 * pit, 0.0))
 
 
-def make_tile(kind: str, u: float, rng: np.random.Generator) -> np.ndarray:
+def make_tile(kind: str, u: float, rng: np.random.Generator, pit: float = 1.0) -> np.ndarray:
     """[NS, NS] heights (m) of one tile at difficulty u in [0, 1]; row index = y, column index = x."""
     if kind == "stairs_down":
         return _stairs(u, True)
@@ -162,20 +162,20 @@ def make_tile(kind: str, u: float, rng: np.random.Generator) -> np.ndarray:
     if kind == "flat":
         return np.zeros((NS, NS))
     if kind == "stones":
-        return _stones(u, rng)
+        return _stones(u, rng, pit)
     if kind == "climb_up":
         return _climb(u, True)
     if kind == "climb_down":
         return _climb(u, False)
     if kind == "gap":
-        return _gap(u)
+        return _gap(u, pit)
     raise KeyError(kind)
 
 
 class TerrainGrid:
     """num_levels rows (y) x len(types) columns (x) of tiles in one heightfield."""
 
-    def __init__(self, seed: int = 0, num_levels: int = NUM_LEVELS, types: tuple = TYPES):
+    def __init__(self, seed: int = 0, num_levels: int = NUM_LEVELS, types: tuple = TYPES, pit: float = 1.0):
         rng = np.random.default_rng(seed)
         self.types, self.num_levels = tuple(types), num_levels
         self.nrow, self.ncol = num_levels * NS, len(self.types) * NS
@@ -183,7 +183,7 @@ class TerrainGrid:
         self.centre_z = np.zeros((num_levels, len(self.types)), np.float32)
         for r in range(num_levels):
             for c, kind in enumerate(self.types):
-                tile = make_tile(kind, (r + 0.5) / num_levels, rng)
+                tile = make_tile(kind, (r + 0.5) / num_levels, rng, pit)
                 self.elev[r * NS:(r + 1) * NS, c * NS:(c + 1) * NS] = tile
                 self.centre_z[r, c] = tile[NS // 2, NS // 2]
         self.h_min, self.h_max = float(self.elev.min()), float(self.elev.max())

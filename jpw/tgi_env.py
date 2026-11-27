@@ -29,7 +29,8 @@ _SCENE_XML = _PARKOUR_XML.replace('pos="{posx} 0 0"', 'pos="{posx} {posy} {posz}
     'size="{rx} {ry} {zmax} 0.1"', 'size="{rx} {ry} {zmax} 0.5"')
 
 
-def build_env(seed: int = 0, goal_rate_weight: float = -0.01, hmap_step: float = 0.0):
+def build_env(seed: int = 0, goal_rate_weight: float = -0.01, hmap_step: float = 0.0,
+              pit: float = 1.0):
     """Returns (unwrapped Go1Tiles env, TerrainGrid)."""
     from mujoco import mjx
     from mujoco_playground._src import mjx_env
@@ -38,7 +39,7 @@ def build_env(seed: int = 0, goal_rate_weight: float = -0.01, hmap_step: float =
 
     from jpw.goal_task import GoalReward
 
-    grid = tg.TerrainGrid(seed)
+    grid = tg.TerrainGrid(seed, pit=pit)
     field = tg.TerrainField(grid)
     prior_cell = np.tile(grid.prior(), grid.num_levels).astype(np.float32)  # type prior spread over levels
     prior_cell = jnp.asarray(prior_cell / prior_cell.sum())
