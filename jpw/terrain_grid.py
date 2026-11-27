@@ -216,10 +216,14 @@ class TerrainField:
     def height(self, x, y):
         return ndi.map_coordinates(self.e, [y / RES, x / RES], order=1, mode="nearest")
 
-    def heightmap_pose_fn(self):
-        """(pos [..., 3], yaw [...]) -> heightmap [..., 12, 8] relative to the base (same layout as jpw.parkour)."""
+    def heightmap_pose_fn(self, step: float = 0.0):
+        """(pos [..., 3], yaw [...]) -> heightmap [..., H, W] relative to the base. step = 0: the coarse 12 x 8 layout
+        of jpw.parkour; step > 0: the same 1.4 x 1.0 m window sampled every `step` metres (0.05 -> 29 x 21)."""
         from jpw.parkour import HM_X, HM_Y, NOMINAL_BASE_H
 
+        if step > 0:
+            HM_X = np.arange(-0.2, 1.2 + 1e-6, step)
+            HM_Y = np.arange(-0.5, 0.5 + 1e-6, step)
         gx, gy = np.meshgrid(HM_X, HM_Y, indexing="ij")
         gx, gy = jnp.asarray(gx, jnp.float32), jnp.asarray(gy, jnp.float32)
 
@@ -231,9 +235,9 @@ class TerrainField:
 
         return fn
 
-    def heightmap_fn(self):
+    def heightmap_fn(self, step: float = 0.0):
         """qpos[..., :7] (base pos + wxyz quat) -> heightmap, as jpw.parkour.make_heightmap_fn."""
         from jpw.goal_task import yaw_from_quat
 
-        pose = self.heightmap_pose_fn()
+        pose = self.heightmap_pose_fn(step)
         return lambda qpos: pose(qpos[..., :3], yaw_from_quat(qpos[..., 3:7]))

@@ -82,9 +82,9 @@ def make_env(cfg: EnvCfg):
     if tiles:
         from jpw import tgi_env
 
-        env, grid = tgi_env.build_env(cfg.terrain_seed, cfg.goal_rate_weight)
+        env, grid = tgi_env.build_env(cfg.terrain_seed, cfg.goal_rate_weight, cfg.hmap_step)
         if cfg.use_heightmap:
-            hmap_fn = env._field.heightmap_fn()
+            hmap_fn = env._field.heightmap_fn(cfg.hmap_step)
     elif cfg.name == PARKOUR_ENV:
         from jpw import parkour
 

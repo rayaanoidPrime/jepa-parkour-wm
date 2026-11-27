@@ -23,6 +23,7 @@ class EnvCfg:
     # nominal pose, motor strength), and Gaussian heightmap noise std in metres (0 = off).
     domain_randomization: bool = False
     hmap_noise: float = 0.0
+    hmap_step: float = 0.0   # Go1Tiles: heightmap sample spacing in m (0 = coarse 12 x 8; 0.05 = 29 x 21)
     # Go1 envs: use the unclipped reward (Playground clips sum(terms) at 0, which zeroes the reward on
     # ~99.7% of steps for an untrained policy) plus a per-step alive bonus (see jpw.go1_reward).
     unclipped_reward: bool = False
