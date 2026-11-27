@@ -241,6 +241,7 @@ def build_env(seed: int = 0, difficulty: float = 1.0, unclipped_reward: bool = F
             self._mjx_model = mjx.put_model(self._mj_model)
             self._post_init()
             self._elev_j = elev_j
+            self._hm_pose_fn = make_heightmap_pose_fn(elev)
             if goal_task:
                 from jpw.goal_task import GoalReward
 

@@ -78,7 +78,14 @@ def make_env(cfg: EnvCfg):
     from mujoco_playground import registry, wrapper
 
     hmap_fn = None
-    if cfg.name == PARKOUR_ENV:
+    tiles = cfg.name == TILES_ENV
+    if tiles:
+        from jpw import tgi_env
+
+        env, grid = tgi_env.build_env(cfg.terrain_seed, cfg.goal_rate_weight)
+        if cfg.use_heightmap:
+            hmap_fn = env._field.heightmap_fn()
+    elif cfg.name == PARKOUR_ENV:
         from jpw import parkour
 
         env, elev = parkour.build_env(cfg.terrain_seed, cfg.terrain_difficulty,
@@ -104,12 +111,16 @@ def make_env(cfg: EnvCfg):
         from jpw.randomize import make_randomization_fn
 
         rand_fn = make_randomization_fn(cfg.num_envs, seed=cfg.terrain_seed)
-    env = wrapper.wrap_for_brax_training(env, episode_length=cfg.episode_length, action_repeat=1,
-                                         randomization_fn=rand_fn)
+    if tiles:  # own auto-reset: a fresh spawn / goal / tile every episode (jpw.tgi_env.FreshAutoReset)
+        env = tgi_env.make_wrapped(env, cfg.episode_length, rand_fn)
+    else:
+        env = wrapper.wrap_for_brax_training(env, episode_length=cfg.episode_length, action_repeat=1,
+                                             randomization_fn=rand_fn)
     return PlaygroundAdapter(env, hmap_fn, cfg.hmap_noise)
 
 
 PARKOUR_ENV = "Go1Parkour"
+TILES_ENV = "Go1Tiles"
 
 
 class PlaygroundAdapter:

@@ -21,7 +21,7 @@ import numpy as np
 
 from jpw import checkpoint
 from jpw.config import apply_overrides
-from jpw.envs import PARKOUR_ENV, get_hmap, get_obs, get_spec, make_env
+from jpw.envs import PARKOUR_ENV, TILES_ENV, get_hmap, get_obs, get_spec, make_env
 
 
 def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0) -> dict:
@@ -34,7 +34,11 @@ def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0) -> dict:
     if got != spec:
         raise ValueError(f"checkpoint was made for {spec}, but this env produces {got}")
     goal = cfg.env.goal_task
+    tiles = cfg.env.name == TILES_ENV
     parkour = cfg.env.name == PARKOUR_ENV and not goal
+    n_cells = env.unwrapped._grid.num_cells if tiles else 1
+    if tiles:  # evaluate every tile (type x level) equally often
+        state = state.replace(info={**state.info, "cur_w": jnp.full((n, n_cells), 1.0 / n_cells)})
     if parkour:
         from jpw.parkour import FINISH_X
 
@@ -61,7 +65,7 @@ def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0) -> dict:
             n_trunc = jnp.zeros(())
         out = (jnp.sum(jnp.where(done, ret, 0.0)), jnp.sum(jnp.where(done, length, 0)),
                jnp.sum(done), prog, succ, n_trunc)
-        if goal:  # split by terrain relief between spawn and goal (flat vs obstacle on the way)
+        if goal and "obstacle" in nxt.info:  # split by terrain relief between spawn and goal (flat vs obstacle on the way)
             obst = nxt.info["obstacle"] > 0.03
             ok = done & trunc & (gd < 0.5)
             out = out + (jnp.sum(done & ~obst), jnp.sum(ok & ~obst), jnp.sum(jnp.where(done & ~obst, gd, 0.0)),
@@ -69,17 +73,26 @@ def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0) -> dict:
         else:
             out = out + (jnp.zeros(()),) * 6
         terms = {k: jnp.sum(v) for k, v in getattr(nxt, "metrics", {}).items() if k.startswith("reward/")}
+        if tiles:
+            ok = (done & trunc & (gd < 0.5)).astype(jnp.float32)
+            cells = (jnp.zeros(n_cells).at[nxt.info["ended_cell"]].add(done.astype(jnp.float32)),
+                     jnp.zeros(n_cells).at[nxt.info["ended_cell"]].add(ok))
+        else:
+            cells = (jnp.zeros(1), jnp.zeros(1))
         return (nxt, jnp.where(done, 0.0, ret), jnp.where(done, 0, length),
-                jnp.where(done, x, xmax)), out, terms
+                jnp.where(done, x, xmax)), out, terms, cells
 
+    cell_n, cell_s = np.zeros(n_cells), np.zeros(n_cells)
     carry = (state, jnp.zeros(n), jnp.zeros(n, jnp.int32), jnp.zeros(n))
     tot = np.zeros(12)
     term_tot: dict[str, float] = {}
     steps_done = 0
     max_steps = cfg.env.episode_length * (-(-episodes // n) + 1)
     for _ in range(max_steps):
-        carry, out, terms = step(*carry)
+        carry, out, terms, cells = step(*carry)
         tot += np.array([float(o) for o in out])
+        cell_n += np.asarray(cells[0])
+        cell_s += np.asarray(cells[1])
         for k, v in terms.items():
             term_tot[k] = term_tot.get(k, 0.0) + float(v)
         steps_done += 1
@@ -94,6 +107,13 @@ def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0) -> dict:
                     "timeout_frac": n_trunc / max(count, 1),
                     "flat_n": int(n_flat), "flat_success": s_flat / max(n_flat, 1), "flat_dist_m": d_flat / max(n_flat, 1),
                     "obst_n": int(n_obs), "obst_success": s_obs / max(n_obs, 1), "obst_dist_m": d_obs / max(n_obs, 1)})
+    if tiles:
+        g = env.unwrapped._grid
+        nt = len(g.types)
+        res["by_type"] = {name: (float(cell_n.reshape(-1, nt)[:, j].sum()), float(cell_s.reshape(-1, nt)[:, j].sum()))
+                          for j, name in enumerate(g.types)}
+        res["by_level"] = [(float(cell_n.reshape(-1, nt)[i].sum()), float(cell_s.reshape(-1, nt)[i].sum()))
+                           for i in range(g.num_levels)]
     dt = float(getattr(env, "dt", 0.02))
     res["terms"] = {k[len("reward/"):]: dt * v / max(steps_done * n, 1) for k, v in term_tot.items()}
     return res
@@ -117,12 +137,16 @@ def main(argv=None):
           f"actor={'student (proprio+heightmap)' if cfg.ac.asymmetric else 'full latent'}", flush=True)
     res = evaluate(cfg, agent, ts, spec, args.episodes, args.seed)
     terms = res.pop("terms", {})
+    by_type, by_level = res.pop("by_type", None), res.pop("by_level", None)
     print("EVAL " + "  ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in res.items()))
     if terms:
         print("TERMS (mean per-step reward contribution, sorted by size; their sum is the task reward)")
         for k in sorted(terms, key=lambda k: -abs(terms[k])):
             print(f"TERM {k:16s} {terms[k]:+.5f}")
         print(f"TERM {'TOTAL':16s} {sum(terms.values()):+.5f}")
+    if by_type:
+        print("TYPES  " + "  ".join(f"{k}={s / max(n_, 1):.2f}({int(n_)})" for k, (n_, s) in by_type.items()))
+        print("LEVELS " + "  ".join(f"L{i}={s / max(n_, 1):.2f}({int(n_)})" for i, (n_, s) in enumerate(by_level)))
     res["terms"] = terms
     return res
 

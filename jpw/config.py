@@ -36,6 +36,13 @@ class EnvCfg:
     # (Playground's auto-reset restores the first state), so this fixed mixture is the curriculum.
     course_ramp: bool = False
     flat_goal_frac: float = 0.0
+    # Go1Tiles (TGI terrain grid, per-episode respawn): success-guided curriculum (jpw.curriculum)
+    curriculum: bool = True
+    sgs_target: float = 0.8
+    sgs_window: int = 16
+    sgs_neighbor: float = 0.25
+    sgs_kappa: float = 5.0
+    sgs_temperature: float = 2.0
 
 
 @dataclass
@@ -191,6 +198,21 @@ PRESETS: dict[str, list[str]] = {
     ],
     "goal_smoke": [
         "env.name=Go1Parkour", "env.goal_task=true", "env.episode_length=400", "env.use_heightmap=true",
+        "env.use_privileged=true", "env.num_envs=256", "wm.decode_state=true", "ac.grounded=true",
+        "ac.fixed_std=0.1", "ac.ent_coef=0.0", "ac.ema=0.995",
+        "train.collect_steps=2", "train.warmup_iters=20", "train.iters=60", "train.log_every=5",
+        "train.ckpt_every=30", "train.replay_capacity=200",
+    ],
+    # TGI terrain grid (11 terrain types x 10 levels, 8 m tiles), goals at random bearings, success-guided curriculum.
+    "tiles": [
+        "env.name=Go1Tiles", "env.goal_task=true", "env.episode_length=400", "env.use_heightmap=true",
+        "env.use_privileged=true", "env.num_envs=1024", "wm.decode_state=true", "ac.grounded=true",
+        "ac.fixed_std=0.1", "ac.ent_coef=0.0", "ac.ema=0.995", "ac.grad_clip_value=0.1", "ac.beta2=0.95",
+        "env.domain_randomization=true", "env.hmap_noise=0.01",
+        "train.collect_steps=2", "train.warmup_iters=64", "train.wm_updates=8", "train.ac_updates=8",
+    ],
+    "tiles_smoke": [
+        "env.name=Go1Tiles", "env.goal_task=true", "env.episode_length=400", "env.use_heightmap=true",
         "env.use_privileged=true", "env.num_envs=256", "wm.decode_state=true", "ac.grounded=true",
         "ac.fixed_std=0.1", "ac.ent_coef=0.0", "ac.ema=0.995",
         "train.collect_steps=2", "train.warmup_iters=20", "train.iters=60", "train.log_every=5",

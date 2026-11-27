@@ -77,7 +77,7 @@ def main(argv=None):
 
         base_env = env.unwrapped
         agent.task = base_env._goal_reward
-        agent.hm_fn = parkour.make_heightmap_pose_fn(np.asarray(base_env._elev_j))
+        agent.hm_fn = base_env._hm_pose_fn
     elif cfg.ac.analytic_reward:
         from jpw.go1_state import Go1Task
 
@@ -127,6 +127,22 @@ def main(argv=None):
             rb = replay.init(t.replay_capacity, n, spec)
         filled = 0
 
+    sampler = None
+    if cfg.env.name == "Go1Tiles" and cfg.env.curriculum:
+        from jpw.curriculum import SuccessGuidedSampler
+
+        grid = env.unwrapped._grid
+        e = cfg.env
+        sampler = SuccessGuidedSampler(grid.num_levels, grid.types, grid.prior(), e.sgs_window, e.sgs_target,
+                                       e.sgs_kappa, e.sgs_temperature, neighbor=e.sgs_neighbor)
+
+        def set_weights(es, w):  # per-env copy of the curriculum weights, read by FreshAutoReset at every respawn
+            cur = jnp.broadcast_to(jnp.asarray(w, jnp.float32), (n, len(w)))
+            cur = par.put_env(cur) if par else cur
+            return es.replace(info={**es.info, "cur_w": cur})
+
+        env_state = set_weights(env_state, sampler.weights())
+
     collect = make_collect(env, agent, t.collect_steps, cfg.env.use_privileged, cfg.env.use_heightmap,
                            par=par)
     if par:
@@ -152,6 +168,12 @@ def main(argv=None):
     for it in range(start_it, t.iters):
         last_it = it
         env_state, key, ep_ret, out = collect(ts, env_state, key, ep_ret)
+        if sampler is not None:
+            cell, done, trunc, gd = (np.asarray(x) for x in jax.device_get(
+                (out["ep_cell"], out["done"], out["trunc"], out["ep_gd"])))
+            fin = done > 0
+            sampler.update(cell[fin].astype(np.int64), (trunc[fin] > 0) & (gd[fin] < 0.5))
+            env_state = set_weights(env_state, sampler.weights())
         rb = add(rb, {k: v for k, v in out.items() if k in replay.FIELDS})
         filled = min(filled + t.collect_steps, t.replay_capacity)
         env_steps += t.collect_steps * n
@@ -177,6 +199,8 @@ def main(argv=None):
             })
             if ep_cnt > 0:
                 m["env/ep_return"] = ep_sum / ep_cnt
+            if sampler is not None:
+                m.update(sampler.log_dict())
             tracker.log(m, step=env_steps)
             ep_sum, ep_cnt, window_steps, window_t0 = 0.0, 0.0, 0, time.time()
 

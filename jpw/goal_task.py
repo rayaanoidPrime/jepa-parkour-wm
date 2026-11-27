@@ -72,6 +72,11 @@ def body_rates_from_gravity(g_prev, g_next, dt):
     return -jnp.cross(_unit(g_next), (g_next - g_prev) / dt)
 
 
+def tile_centre(pos, tile_size):
+    """Centre (x, y) of the tile (tiles are aligned at the origin) that contains the base position `pos`."""
+    return (jnp.floor(pos[..., :2] / tile_size) + 0.5) * tile_size
+
+
 def goal_features(pos, yaw, goal_xy, goal_yaw, t_left_s):
     """Goal in the heading frame + remaining time: [..., 5]."""
     d = goal_xy - pos[..., :2]
@@ -104,13 +109,14 @@ class GoalReward:
 
     def __init__(self, default_pose, soft_lo, soft_hi, ground_fn, dt=0.02, kp=35.0, kd=0.5, action_scale=0.5,
                  tau_limit=23.7, qd_limit=30.0, term_angle=1.4, term_height=0.12, pit_z=None, lane_half=None,
-                 weights=None):
+                 weights=None, tile_size=None):
         self.default_pose = jnp.asarray(default_pose, jnp.float32)
         self.lo, self.hi = jnp.asarray(soft_lo, jnp.float32), jnp.asarray(soft_hi, jnp.float32)
         self.ground, self.dt = ground_fn, dt
         self.kp, self.kd, self.scale = kp, kd, action_scale
         self.tau_limit, self.qd_limit = tau_limit, qd_limit
         self.term_angle, self.term_height, self.pit_z, self.lane_half = term_angle, term_height, pit_z, lane_half
+        self.tile_size = tile_size  # tiled terrain: leaving the 8 m tile terminates (tile centre passed per call)
         self.w = dict(self.W, **(weights or {}))
 
     @classmethod
@@ -120,8 +126,8 @@ class GoalReward:
                    dt=float(u.dt), **kw)
 
     # ------------------------------------------------------------------
-    def soft_termination(self, pos, g_b, tz=0.02, tt=0.03):
-        """1 - P(alive): tilt, belly too close to the terrain, pit, lane (all differentiable)."""
+    def soft_termination(self, pos, g_b, tz=0.02, tt=0.03, tile_xy=None):
+        """1 - P(alive): tilt, belly too close to the terrain, pit, lane, tile exit (all differentiable)."""
         sig = jax.nn.sigmoid
         hb = pos[..., 2] - self.ground(pos[..., 0], pos[..., 1])
         alive = sig((-g_b[..., 2] - jnp.cos(self.term_angle)) / tt) * sig((hb - self.term_height) / tz)
@@ -129,9 +135,13 @@ class GoalReward:
             alive = alive * sig((pos[..., 2] - self.pit_z) / tz)
         if self.lane_half is not None:
             alive = alive * sig((self.lane_half - jnp.abs(pos[..., 1])) / 0.05)
+        if self.tile_size is not None and tile_xy is not None:
+            half = self.tile_size / 2 - 0.05
+            off = jnp.abs(pos[..., :2] - tile_xy)
+            alive = alive * jnp.prod(sig((half - off) / 0.05), -1)
         return 1.0 - alive
 
-    def terms(self, prev, nxt, pos, yaw, goal_xy, goal_yaw, t_left_s, a, a_prev, contact):
+    def terms(self, prev, nxt, pos, yaw, goal_xy, goal_yaw, t_left_s, a, a_prev, contact, tile_xy=None):
         """prev / nxt: dicts with 'g' (gravity dir, body), 'jpos' (joint pos relative to default), and for nxt also
         'linvel' (body), 'gyro', 'feet_vel' (4 x 3). pos / yaw: base pose at the END of the step. Returns the
         per-second reward terms (before the weights) and the termination probability."""
@@ -183,13 +193,13 @@ class GoalReward:
         bearing = jnp.arctan2(to_goal[..., 1], to_goal[..., 0])
         r_face = far * jnp.cos(yaw - bearing)
         r_lat = v_b[..., 1] ** 2
-        d = self.soft_termination(pos, g)
+        d = self.soft_termination(pos, g, tile_xy=tile_xy)
         t = dict(pos=r_pos, head=r_head, move=r_move, stand=r_stand, term=d, events=events, roll=r_roll,
                  joint=r_joint, rate=r_rate, qlim=r_qlim, qdlim=r_qdlim, taulim=r_taulim, power=r_power,
                  face=r_face, lat=r_lat)
         return t, d
 
-    def reward(self, prev, nxt, pos, yaw, goal_xy, goal_yaw, t_left_s, a, a_prev, contact):
-        t, d = self.terms(prev, nxt, pos, yaw, goal_xy, goal_yaw, t_left_s, a, a_prev, contact)
+    def reward(self, prev, nxt, pos, yaw, goal_xy, goal_yaw, t_left_s, a, a_prev, contact, tile_xy=None):
+        t, d = self.terms(prev, nxt, pos, yaw, goal_xy, goal_yaw, t_left_s, a, a_prev, contact, tile_xy)
         r = sum(self.w[k] * v for k, v in t.items()) * self.dt
         return r, d, t

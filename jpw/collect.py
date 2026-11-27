@@ -45,6 +45,9 @@ def make_collect(env, agent: Agent, n_steps: int, use_priv: bool, use_hmap: bool
             contact = get_contact(nxt)
             if contact is not None:
                 out["contact"] = contact
+            if "ended_cell" in nxt.info:  # tiles: which tile the finished episode was in, and how far from the goal
+                out["ep_cell"] = nxt.info["ended_cell"]
+                out["ep_gd"] = nxt.info["goal_dist"]
             aux = get_aux(es)  # physical state at the same time as obs
             if aux is not None:
                 out["aux"] = aux
