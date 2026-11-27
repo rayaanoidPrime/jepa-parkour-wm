@@ -81,15 +81,16 @@ def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0, only_types=None
             out = out + (jnp.zeros(()),) * 6
         terms = {k: jnp.sum(v) for k, v in getattr(nxt, "metrics", {}).items() if k.startswith("reward/")}
         if tiles:
+            why = jnp.sum(nxt.info["why"] * done[:, None].astype(jnp.float32), 0)
             ok = (done & trunc & (gd < 0.5)).astype(jnp.float32)
             cells = (jnp.zeros(n_cells).at[nxt.info["ended_cell"]].add(done.astype(jnp.float32)),
-                     jnp.zeros(n_cells).at[nxt.info["ended_cell"]].add(ok))
+                     jnp.zeros(n_cells).at[nxt.info["ended_cell"]].add(ok), why)
         else:
-            cells = (jnp.zeros(1), jnp.zeros(1))
+            cells = (jnp.zeros(1), jnp.zeros(1), jnp.zeros(5))
         return (nxt, jnp.where(done, 0.0, ret), jnp.where(done, 0, length),
                 jnp.where(done, x, xmax)), out, terms, cells
 
-    cell_n, cell_s = np.zeros(n_cells), np.zeros(n_cells)
+    cell_n, cell_s, why_tot = np.zeros(n_cells), np.zeros(n_cells), np.zeros(5)
     carry = (state, jnp.zeros(n), jnp.zeros(n, jnp.int32), jnp.zeros(n))
     tot = np.zeros(12)
     term_tot: dict[str, float] = {}
@@ -100,6 +101,7 @@ def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0, only_types=None
         tot += np.array([float(o) for o in out])
         cell_n += np.asarray(cells[0])
         cell_s += np.asarray(cells[1])
+        why_tot += np.asarray(cells[2])
         for k, v in terms.items():
             term_tot[k] = term_tot.get(k, 0.0) + float(v)
         steps_done += 1
@@ -119,6 +121,7 @@ def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0, only_types=None
         nt = len(g.types)
         res["by_type"] = {name: (float(cell_n.reshape(-1, nt)[:, j].sum()), float(cell_s.reshape(-1, nt)[:, j].sum()))
                           for j, name in enumerate(g.types)}
+        res["why"] = why_tot
         res["by_level"] = [(float(cell_n.reshape(-1, nt)[i].sum()), float(cell_s.reshape(-1, nt)[i].sum()))
                            for i in range(g.num_levels)]
     dt = float(getattr(env, "dt", 0.02))
@@ -146,13 +149,17 @@ def main(argv=None):
           f"actor={'student (proprio+heightmap)' if cfg.ac.asymmetric else 'full latent'}", flush=True)
     res = evaluate(cfg, agent, ts, spec, args.episodes, args.seed, args.types, args.levels)
     terms = res.pop("terms", {})
-    by_type, by_level = res.pop("by_type", None), res.pop("by_level", None)
+    by_type, by_level, why = res.pop("by_type", None), res.pop("by_level", None), res.pop("why", None)
     print("EVAL " + "  ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in res.items()))
     if terms:
         print("TERMS (mean per-step reward contribution, sorted by size; their sum is the task reward)")
         for k in sorted(terms, key=lambda k: -abs(terms[k])):
             print(f"TERM {k:16s} {terms[k]:+.5f}")
         print(f"TERM {'TOTAL':16s} {sum(terms.values()):+.5f}")
+    if why is not None:
+        names = ("tilt", "belly", "fell", "left_tile", "base_done")
+        print("ENDED-BY (share of episodes whose termination condition held; timeouts excluded) " +
+              "  ".join(f"{k}={x / max(res['episodes'], 1):.2f}" for k, x in zip(names, why)))
     if by_type:
         print("TYPES  " + "  ".join(f"{k}={s / max(n_, 1):.2f}({int(n_)})" for k, (n_, s) in by_type.items()))
         print("LEVELS " + "  ".join(f"L{i}={s / max(n_, 1):.2f}({int(n_)})" for i, (n_, s) in enumerate(by_level)))

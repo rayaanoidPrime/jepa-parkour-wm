@@ -95,7 +95,7 @@ def build_env(seed: int = 0, goal_rate_weight: float = -0.01):
                 "pert_duration": jnp.zeros((), jnp.int32), "steps_since_last_pert": 0, "pert_steps": 0,
                 "pert_dir": jnp.zeros(3), "pert_mag": jnp.zeros(()),
                 "goal": goal, "goal_dist": dist, "cell": cell, "ended_cell": cell,
-                "tile_xy": jnp.stack([cx, cy]), "cur_w": prior_cell,
+                "tile_xy": jnp.stack([cx, cy]), "cur_w": prior_cell, "why": jnp.zeros(5),
             }
             metrics = {f"reward/{k}": jnp.zeros(()) for k in self._config.reward_config.scales.keys()}
             metrics["swing_peak"] = jnp.zeros(())
@@ -122,8 +122,11 @@ def build_env(seed: int = 0, goal_rate_weight: float = -0.01):
             g_z = gs.split(phys1)["gravity"][2]
             hb = pos[2] - field.height(pos[0], pos[1])
             out_tile = jnp.any(jnp.abs(pos[:2] - tile) > tg.TILE / 2 - 0.05)
-            bad = ((-g_z < jnp.cos(self._goal_reward.term_angle)) | (hb < self._goal_reward.term_height)
-                   | (pos[2] < FALL_Z) | out_tile)
+            tilt = -g_z < jnp.cos(self._goal_reward.term_angle)
+            belly = hb < self._goal_reward.term_height
+            fell = pos[2] < FALL_Z
+            bad = tilt | belly | fell | out_tile
+            out.info["why"] = jnp.stack([tilt, belly, fell, out_tile, out.done > 0]).astype(jnp.float32)
             done = jnp.maximum(out.done, bad.astype(out.done.dtype))
             out.info["goal_dist"] = jnp.sqrt(jnp.sum((goal[:2] - pos[:2]) ** 2) + 1e-8)
             return out.replace(reward=r, done=done)
@@ -146,7 +149,7 @@ class FreshAutoReset:
     `info["cur_w"]` (per-env copy of the curriculum weights). The terminal step keeps `truncation`, `goal_dist` and
     `ended_cell` of the episode that just ended (the trainer needs them for the curriculum and for the replay)."""
 
-    KEEP = ("truncation", "goal_dist", "cur_w", "episode_done", "episode_metrics")
+    KEEP = ("truncation", "goal_dist", "cur_w", "episode_done", "episode_metrics", "why")
 
     def __init__(self, env):
         self.env = env
