@@ -42,6 +42,9 @@ strong hints, not proof. No large run has been launched.
 | Fixed action noise | `ac.fixed_std` (set `ac.ent_coef=0` with it) |
 | Go1 parkour env: procedural stairs / boxes / gaps hfield, heightmap obs | `jpw/parkour.py` |
 | Goal-reaching task (AME2 reward, pose integration, goal features) | `jpw/goal_task.py`, `env.goal_task`, `env.episode_length=400` |
+| TGI terrain grid (11 types x 10 levels, 8 m tiles, Go1-scaled), `TerrainField` lookups | `jpw/terrain_grid.py` |
+| Go1Tiles env: goals at random bearings, per-episode respawn (`FreshAutoReset`), tile-exit / fall termination | `jpw/tgi_env.py` (`env.name=Go1Tiles`) |
+| Success-guided terrain curriculum (TGI's sampler) | `jpw/curriculum.py`, `env.sgs_*` |
 | Domain randomisation + heightmap noise | `jpw/randomize.py`, `env.domain_randomization`, `env.hmap_noise` |
 | Multi-GPU data parallel | `jpw/parallel.py`, `train.num_devices` |
 | Rollout export, full checkpoints, resume, eval | `jpw/export.py`, `jpw/checkpoint.py`, `jpw/eval.py` |
@@ -225,6 +228,27 @@ randomisation alone gives 0% success (46-step episodes). So it is the dynamics r
 without it, and training with it fixes that. Which individual parameter (friction, mass, COM, joint friction, nominal-pose
 jitter, motor strength) matters most was not isolated. The evaluation randomisation is the training distribution, not
 out-of-distribution physics.
+
+### 14. Port of TGI's terrain set and curriculum (`env.name=Go1Tiles`, presets `tiles` / `tiles_smoke`)
+Why: TGI's environment is Isaac Lab / Newton (NVIDIA-only, ANYmal-D or G1), so it cannot run on this cluster; what our
+corridor course lacked relative to it was terrain variety and a curriculum, not the physics engine. Ported:
+- **Terrain** (`jpw/terrain_grid.py`): one MuJoCo heightfield of 10 difficulty levels (rows) x 11 terrain types (columns) of
+  8 m tiles at 5 cm resolution (1600 x 1760 cells): pyramid stairs down / up, random boxes (0.45 m grid), rough ground,
+  pyramid slopes down / up, flat, Stones-Everywhere stepping stones (TGI's own generator, Go1-scaled), and the ANYmal
+  parkour families climb-up (pit), climb-down (box) and gap. Every tile is radial around a 2 m start platform.
+  Go1-scaling is my choice, not TGI's: stair / box / slope heights x0.55 (stairs 0.055-0.14 m, climbs 0.04-0.36 m, gaps
+  0.035-0.35 m, slopes up to 0.44), stone sizes and gaps x0.65. Stepping-stone and gap floors are 0.8-1.5 m deep and the
+  episode ends below z = -0.5 (Go1 version of TGI's floorless-gap termination).
+- **Task**: spawn on a tile's platform with a random heading, goal 2.5-3.5 m away at a random bearing, 8 s, AME2 reward;
+  leaving the tile, tilt, belly on the terrain or falling ends the episode.
+- **Respawn**: Playground restores every env's first state on auto-reset, so `FreshAutoReset` really resets finished envs
+  (fresh tile, spawn and goal each episode). Verified on Go1: finished envs land in a different tile, `ended_cell` records
+  the finished episode, the timeout flag survives, the time-left feature restarts.
+- **Curriculum** (`jpw/curriculum.py`): TGI's success-guided sampler (per-tile success EMA, weight
+  (p+eps)^(kappa t)(1-p+eps)^(kappa(1-t)), neighbour lower bound 0.25, softmax over levels per type, type prior shares).
+  Success = within 0.5 m of the goal at the time limit. Weights are written into the envs every iteration.
+- **Not ported**: the foothold prediction model, "virtual floors" (visible, non-colliding), travel-direction bins in the
+  sampler, TGI's G1 / ANYmal-specific kinematics and actuator model, the pallet / wave / corridor terrains.
 
 ## Status and what is left
 
