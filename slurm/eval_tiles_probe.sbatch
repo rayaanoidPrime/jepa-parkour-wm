@@ -1,5 +1,6 @@
 #!/bin/bash
-# Probe the easy levels of the weak Go1Tiles terrain types.   sbatch slurm/eval_tiles_probe.sbatch CKPT
+# Probe the easy levels of chosen Go1Tiles terrain types and report why episodes end.
+#   [TYPES="stones gap"] sbatch slurm/eval_tiles_probe.sbatch CKPT
 #SBATCH --job-name=probe
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -16,10 +17,10 @@ source "${JPW_VENV:-$HOME/venvs/jpw}/bin/activate"
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_command_buffer= --xla_gpu_enable_triton_gemm=false"
 export MUJOCO_GL="${MUJOCO_GL:-disable}"
 CK="$1"
-for t in stones gap climb_up stairs_down; do
+for t in ${TYPES:-stones gap climb_up stairs_down}; do
   for lv in "0 1" "2 3"; do
     python -u -m jpw.eval --ckpt "$CK" --episodes 128 --num-envs 128 --types $t --levels $lv 2>&1 \
-      | grep -E "^EVAL|Error|Traceback" | sed "s/^/PROBE $t levels[$lv] /" | cut -c1-260
+      | grep -E "^EVAL|^ENDED|Error|Traceback" | sed "s/^/PROBE $t levels[$lv] /" | cut -c1-300
   done
 done
 echo "##### PROBE-DONE"
