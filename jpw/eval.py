@@ -24,7 +24,7 @@ from jpw.config import apply_overrides
 from jpw.envs import PARKOUR_ENV, TILES_ENV, get_hmap, get_obs, get_spec, make_env
 
 
-def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0) -> dict:
+def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0, only_types=None, only_levels=None) -> dict:
     env = make_env(cfg.env)
     n = cfg.env.num_envs
     key = jax.random.PRNGKey(seed)
@@ -37,8 +37,15 @@ def evaluate(cfg, agent, ts, spec, episodes: int, seed: int = 0) -> dict:
     tiles = cfg.env.name == TILES_ENV
     parkour = cfg.env.name == PARKOUR_ENV and not goal
     n_cells = env.unwrapped._grid.num_cells if tiles else 1
-    if tiles:  # evaluate every tile (type x level) equally often
-        state = state.replace(info={**state.info, "cur_w": jnp.full((n, n_cells), 1.0 / n_cells)})
+    if tiles:  # evaluate every tile (type x level) equally often, or only the chosen types / levels
+        g = env.unwrapped._grid
+        sel = np.ones((g.num_levels, len(g.types)), np.float32)
+        if only_types:
+            sel *= np.asarray([[t in only_types for t in g.types]], np.float32)
+        if only_levels is not None:
+            sel *= np.asarray([[lv in only_levels] for lv in range(g.num_levels)], np.float32)
+        w = (sel / sel.sum()).reshape(-1)
+        state = state.replace(info={**state.info, "cur_w": jnp.broadcast_to(jnp.asarray(w), (n, n_cells))})
     if parkour:
         from jpw.parkour import FINISH_X
 
@@ -126,6 +133,8 @@ def main(argv=None):
     p.add_argument("--num-envs", type=int, default=256)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE")
+    p.add_argument("--types", nargs="*", default=None, help="Go1Tiles: evaluate only these terrain types")
+    p.add_argument("--levels", nargs="*", type=int, default=None, help="Go1Tiles: evaluate only these levels")
     args = p.parse_args(argv)
 
     cfg, spec, agent, ts, meta = checkpoint.load(args.ckpt)
@@ -135,7 +144,7 @@ def main(argv=None):
     apply_overrides(cfg, args.set)
     print(f"loaded {args.ckpt} (it={meta['it']}, env_steps={meta['env_steps']}); "
           f"actor={'student (proprio+heightmap)' if cfg.ac.asymmetric else 'full latent'}", flush=True)
-    res = evaluate(cfg, agent, ts, spec, args.episodes, args.seed)
+    res = evaluate(cfg, agent, ts, spec, args.episodes, args.seed, args.types, args.levels)
     terms = res.pop("terms", {})
     by_type, by_level = res.pop("by_type", None), res.pop("by_level", None)
     print("EVAL " + "  ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in res.items()))
