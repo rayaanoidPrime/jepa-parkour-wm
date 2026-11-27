@@ -66,9 +66,10 @@ def build_env(seed: int = 0, goal_rate_weight: float = -0.01):
             return jnp.zeros(3)  # the goal drives the policy
 
         def reset(self, rng):
-            """rng: a PRNG key, or (key, cell) to start in a given tile (cell = level * num_types + type)."""
-            if isinstance(rng, (tuple, list)):
-                key, cell = rng
+            """rng: a PRNG key [2], or [3] = (key, tile) to start in a given tile (tile = level * num_types + type;
+            packed in the key array because Brax's wrappers expect an array)."""
+            if rng.shape[-1] == 3:
+                key, cell = rng[:2], rng[2]
             else:
                 key, k_c = jax.random.split(rng)
                 cell = jax.random.categorical(k_c, jnp.log(prior_cell))
@@ -161,8 +162,7 @@ class FreshAutoReset:
 
     def reset(self, rng):
         state = self.env.reset(rng)
-        key = rng[0] if isinstance(rng, (tuple, list)) else rng
-        state.info["reset_key"] = key
+        state.info["reset_key"] = rng[..., :2]
         return state
 
     def step(self, state, action):
@@ -171,7 +171,7 @@ class FreshAutoReset:
         k = jax.vmap(lambda key: jax.random.split(key, 3))(state.info["reset_key"])
         new_key, k_cell, k_res = k[:, 0], k[:, 1], k[:, 2]
         cell = jax.vmap(lambda kk, w: jax.random.categorical(kk, jnp.log(w + 1e-9)))(k_cell, state.info["cur_w"])
-        fresh = self.env.reset((k_res, cell.astype(jnp.int32)))
+        fresh = self.env.reset(jnp.concatenate([k_res, cell[:, None].astype(k_res.dtype)], -1))
         done = state.done > 0
 
         def pick(f, s):
