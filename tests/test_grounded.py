@@ -128,3 +128,14 @@ def test_grounded_requires_decoder_and_goal_obs():
     bad = Spec(obs_dim=171, prop_dim=48, act_dim=12, hmap_shape=(12, 8), contact_dim=4, aux_dim=19)
     with pytest.raises(ValueError):
         Agent(_cfg(), bad)
+
+
+def test_tile_bounds_enter_the_soft_termination():
+    rw = gt.GoalReward(np.zeros(12), -np.ones(12), np.ones(12), lambda x, y: jnp.zeros_like(x), tile_size=8.0)
+    g = jnp.asarray([[0.0, 0.0, -1.0]])
+    tile = jnp.asarray([[4.0, 4.0]])
+    inside = rw.soft_termination(jnp.asarray([[5.0, 4.0, 0.3]]), g, tile_xy=tile)
+    outside = rw.soft_termination(jnp.asarray([[8.5, 4.0, 0.3]]), g, tile_xy=tile)
+    assert float(inside[0]) < 0.01 and float(outside[0]) > 0.99
+    c = gt.tile_centre(jnp.asarray([[17.0, 3.0]]), 8.0)
+    np.testing.assert_allclose(np.asarray(c), [[20.0, 4.0]])

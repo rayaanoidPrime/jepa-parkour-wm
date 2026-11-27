@@ -278,3 +278,33 @@ def test_graded_course_ramps_difficulty_and_has_flat_goals():
     sp0, p0 = pk.spawn_positions(0, 1.0, ramp=False)
     prof0 = pk.make_course(0, 1.0, False)
     assert not any(np.ptp(prof0[(xs >= x) & (xs <= x + 3.5)]) < 0.03 for x in sp0)
+
+
+@requires_sim
+def test_tiles_env_respawns_fresh_tiles_and_keeps_terminal_info():
+    from jpw.config import EnvCfg
+    from jpw.envs import get_obs, get_spec, make_env
+
+    cfg = EnvCfg(name="Go1Tiles", num_envs=4, episode_length=12, goal_task=True, use_heightmap=True,
+                 use_privileged=True)
+    env = make_env(cfg)
+    grid = env.unwrapped._grid
+    st = jax.jit(env.reset)(jax.random.split(jax.random.PRNGKey(0), 4))
+    spec = get_spec(st, cfg, env.action_size)
+    assert spec.obs_dim == 176 and spec.aux_dim == 19 and spec.hmap_shape == (12, 8)
+    cx, cy = grid.cell_centre(np.asarray(st.info["cell"]))
+    assert np.abs(np.asarray(st.data.qpos[:, :2]) - np.stack([cx, cy], -1)).max() < 0.25  # spawn on the tile centre
+    d = np.asarray(st.info["goal_dist"])
+    assert d.min() >= 2.5 and d.max() <= 3.5
+    step = jax.jit(env.step)
+    zero = jnp.zeros((4, env.action_size))
+    seen_done = False
+    for _ in range(14):
+        prev = np.asarray(st.info["cell"])
+        st = step(st, zero)
+        if float(st.done.max()) > 0:
+            seen_done = True
+            assert (np.asarray(st.info["ended_cell"]) == prev).all()
+            assert float(st.info["truncation"].min()) > 0           # timeout flag of the finished episode survives
+    assert seen_done and bool(jnp.all(jnp.isfinite(st.reward)))
+    assert float(st.obs["extra"][:, 4].min()) > 0.9                 # time-left feature restarted with the new episode
