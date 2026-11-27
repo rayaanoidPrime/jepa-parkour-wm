@@ -79,9 +79,9 @@ def build_env(seed: int = 0, goal_rate_weight: float = -0.01):
             jit = jax.random.uniform(k1, (2,), minval=-0.2, maxval=0.2)
             sx, sy = cx + jit[0], cy + jit[1]
             yaw = jax.random.uniform(k2, (), minval=-jnp.pi, maxval=jnp.pi)
-            qpos = self._init_q.at[0].set(sx).at[1].set(sy).at[2].set(0.35 + field.height(sx, sy))
+            qpos = self._init_q.at[0].set(sx).at[1].set(sy).at[2].set(0.29 + field.height(sx, sy))
             qpos = qpos.at[3:7].set(jnp.array([jnp.cos(yaw / 2), 0.0, 0.0, jnp.sin(yaw / 2)]))
-            qvel = jnp.zeros(self.mjx_model.nv).at[0:6].set(jax.random.uniform(k3, (6,), minval=-0.5, maxval=0.5))
+            qvel = jnp.zeros(self.mjx_model.nv).at[0:6].set(jax.random.uniform(k3, (6,), minval=-0.1, maxval=0.1))
             data = mjx_env.init(self.mjx_model, qpos=qpos, qvel=qvel, ctrl=qpos[7:])
             dist = jax.random.uniform(k4, (), minval=2.5, maxval=3.5)
             bearing = jax.random.uniform(k5, (), minval=0.0, maxval=2 * jnp.pi)
